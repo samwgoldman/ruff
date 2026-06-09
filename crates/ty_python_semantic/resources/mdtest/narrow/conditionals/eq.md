@@ -284,6 +284,28 @@ def _(answer: CoupledInequality):
         reveal_type(answer)  # revealed: CoupledInequality
 ```
 
+Finite domains remain narrowable when the other operand also includes an identity singleton:
+
+```py
+from enum import Enum
+from typing import Literal
+
+class Finite(Enum):
+    FIRST = 1
+    SECOND = 2
+
+def _(value: Finite, other: Literal[Finite.FIRST] | None):
+    if value == other:
+        reveal_type(value)  # revealed: Literal[Finite.FIRST]
+    else:
+        reveal_type(value)  # revealed: Finite
+
+    if value != other:
+        reveal_type(value)  # revealed: Finite
+    else:
+        reveal_type(value)  # revealed: Literal[Finite.FIRST]
+```
+
 ## Known built-in equality behavior
 
 `bool`, `LiteralString`, `TypedDict`, and final classes that inherit `object.__eq__` have known

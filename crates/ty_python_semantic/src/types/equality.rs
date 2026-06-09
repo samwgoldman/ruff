@@ -263,6 +263,28 @@ impl<'db> ComparisonEvaluator<'db> {
         branch: ComparisonBranch,
         operator: ComparisonOperator,
     ) -> ComparisonResult<'db> {
+        self.evaluate_impl(left, right, branch, operator, true)
+    }
+
+    /// Evaluate after type-variable expansion without immediately re-expanding finite domains.
+    fn evaluate_without_finite_expansion(
+        &mut self,
+        left: Type<'db>,
+        right: Type<'db>,
+        branch: ComparisonBranch,
+        operator: ComparisonOperator,
+    ) -> ComparisonResult<'db> {
+        self.evaluate_impl(left, right, branch, operator, false)
+    }
+
+    fn evaluate_impl(
+        &mut self,
+        left: Type<'db>,
+        right: Type<'db>,
+        branch: ComparisonBranch,
+        operator: ComparisonOperator,
+        expand_finite_domains: bool,
+    ) -> ComparisonResult<'db> {
         let left = left.resolve_type_alias(self.db);
         let right = right.resolve_type_alias(self.db);
         let key = ComparisonKey {
@@ -278,7 +300,8 @@ impl<'db> ComparisonEvaluator<'db> {
             return ComparisonResult::Ambiguous;
         }
 
-        let result = evaluate_comparison_once(self, left, right, branch, operator);
+        let result =
+            evaluate_comparison_once(self, left, right, branch, operator, expand_finite_domains);
         self.active.remove(&key);
         result
     }
@@ -286,21 +309,52 @@ impl<'db> ComparisonEvaluator<'db> {
 
 /// Evaluate a comparison whose aliases are resolved and whose key is registered as active.
 ///
-/// Recursive comparisons must use [`ComparisonEvaluator::evaluate`] so cycles are detected.
+/// Recursive comparisons must use a [`ComparisonEvaluator`] entry point so cycles are detected.
 fn evaluate_comparison_once<'db>(
     evaluator: &mut ComparisonEvaluator<'db>,
     left: Type<'db>,
     right: Type<'db>,
     branch: ComparisonBranch,
     operator: ComparisonOperator,
+    expand_finite_domains: bool,
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
 
-    if let Some(alternatives) = finite_alternatives(db, left, operator) {
-        return evaluate_union_left(evaluator, &alternatives, right, branch, operator);
-    }
-    if let Some(alternatives) = finite_alternatives(db, right, operator) {
-        return evaluate_union_right(evaluator, left, &alternatives, branch, operator);
+    if expand_finite_domains {
+        if !finite_domain_expansion_is_bounded(db, left, right, operator) {
+            return ComparisonResult::Ambiguous;
+        }
+
+        let left_alternatives = finite_alternatives(db, left, operator);
+        if left == right
+            && let Some(alternatives) = left_alternatives.as_deref()
+        {
+            return if alternatives.len() == 1 {
+                operator.result_from_equality(true)
+            } else {
+                ComparisonResult::Ambiguous
+            };
+        }
+
+        let right_alternatives = finite_alternatives(db, right, operator);
+        if let (Some(left_alternatives), Some(right_alternatives)) =
+            (left_alternatives.as_deref(), right_alternatives.as_deref())
+        {
+            return evaluate_finite_domains(
+                evaluator,
+                left_alternatives,
+                right_alternatives,
+                branch,
+                operator,
+            );
+        }
+
+        if let Some(alternatives) = left_alternatives {
+            return evaluate_union_left(evaluator, &alternatives, right, branch, operator);
+        }
+        if let Some(alternatives) = right_alternatives {
+            return evaluate_union_right(evaluator, left, &alternatives, branch, operator);
+        }
     }
 
     match (left, right) {
@@ -354,14 +408,22 @@ fn evaluate_comparison_once<'db>(
                     ComparisonResult::Ambiguous
                 }
             }
-            Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
-                evaluator.evaluate(constraints.as_type(db), other, branch, operator)
-            }
+            Some(TypeVarBoundOrConstraints::Constraints(constraints)) => evaluator
+                .evaluate_without_finite_expansion(
+                    constraints.as_type(db),
+                    other,
+                    branch,
+                    operator,
+                ),
         },
         (other, Type::TypeVar(var)) => match var.typevar(db).bound_or_constraints(db) {
-            Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
-                evaluator.evaluate(other, constraints.as_type(db), branch, operator)
-            }
+            Some(TypeVarBoundOrConstraints::Constraints(constraints)) => evaluator
+                .evaluate_without_finite_expansion(
+                    other,
+                    constraints.as_type(db),
+                    branch,
+                    operator,
+                ),
             None | Some(TypeVarBoundOrConstraints::UpperBound(_)) => ComparisonResult::Ambiguous,
         },
 
@@ -845,6 +907,188 @@ fn evaluate_intersection_left<'db>(
     }
 }
 
+fn evaluate_finite_domains<'db>(
+    evaluator: &mut ComparisonEvaluator<'db>,
+    left: &[Type<'db>],
+    right: &[Type<'db>],
+    branch: ComparisonBranch,
+    operator: ComparisonOperator,
+) -> ComparisonResult<'db> {
+    let db = evaluator.db;
+    if left.is_empty() || right.is_empty() {
+        return ComparisonResult::Ambiguous;
+    }
+
+    let Some(other_keys) = right
+        .iter()
+        .map(|alternative| finite_comparison_key(db, *alternative, operator))
+        .collect::<Option<FxHashSet<_>>>()
+    else {
+        return ComparisonResult::Ambiguous;
+    };
+
+    evaluate_target_union(db, left, branch, |alternative| {
+        if let Some(key) = finite_comparison_key(db, alternative, operator) {
+            if !other_keys.contains(&key) {
+                operator.result_from_equality(false)
+            } else if other_keys.len() == 1 {
+                operator.result_from_equality(true)
+            } else {
+                ComparisonResult::Ambiguous
+            }
+        } else {
+            evaluate_against_results(
+                db,
+                alternative,
+                branch,
+                right
+                    .iter()
+                    .map(|other| evaluator.evaluate(alternative, *other, branch, operator)),
+            )
+        }
+    })
+}
+
+fn finite_comparison_key<'db>(
+    db: &'db dyn Db,
+    ty: Type<'db>,
+    operator: ComparisonOperator,
+) -> Option<Type<'db>> {
+    let literal = match ty {
+        Type::LiteralValue(literal) => literal.kind(),
+        Type::Intersection(intersection) => LiteralValueTypeKind::Enum(
+            intersection
+                .positive(db)
+                .iter()
+                .find_map(|element| element.as_enum_literal())?,
+        ),
+        _ if has_known_identity_comparison_semantics(db, ty, operator) => return Some(ty),
+        _ => return None,
+    };
+
+    match literal {
+        LiteralValueTypeKind::Bool(value) => Some(Type::int_literal(i64::from(value))),
+        LiteralValueTypeKind::Int(_)
+        | LiteralValueTypeKind::String(_)
+        | LiteralValueTypeKind::Bytes(_) => Some(ty),
+        LiteralValueTypeKind::LiteralString => None,
+        LiteralValueTypeKind::Enum(enum_literal) => {
+            match KnownComparisonSemantics::of_instance(
+                db,
+                enum_literal.enum_class_instance(db),
+                operator,
+            )? {
+                KnownComparisonSemantics::Object => {
+                    let metadata = enum_metadata(db, enum_literal.enum_class(db))?;
+                    let name = metadata.resolve_member(enum_literal.name(db))?;
+                    Some(Type::enum_literal(EnumLiteralType::new(
+                        db,
+                        enum_literal.enum_class(db),
+                        name.clone(),
+                    )))
+                }
+                KnownComparisonSemantics::Int
+                | KnownComparisonSemantics::Str
+                | KnownComparisonSemantics::Bytes => {
+                    finite_comparison_key(db, enum_literal_value(db, enum_literal)?, operator)
+                }
+                KnownComparisonSemantics::Tuple | KnownComparisonSemantics::Dict => None,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum FiniteComparisonDomain {
+    None,
+    Finite,
+    Mixed,
+}
+
+fn finite_domain_expansion_is_bounded(
+    db: &dyn Db,
+    target: Type,
+    other: Type,
+    operator: ComparisonOperator,
+) -> bool {
+    !matches!(other, Type::Union(_))
+        || !finite_domain_expansion_may_grow(db, target, operator)
+        || finite_comparison_domain(db, other, operator) == FiniteComparisonDomain::Finite
+}
+
+fn finite_domain_expansion_may_grow(db: &dyn Db, ty: Type, operator: ComparisonOperator) -> bool {
+    match ty {
+        Type::Union(union) => union
+            .elements(db)
+            .iter()
+            .any(|element| finite_domain_expansion_may_grow(db, *element, operator)),
+        Type::EnumComplement(_) => KnownComparisonSemantics::of_type(db, ty, operator).is_some(),
+        Type::Intersection(intersection) => {
+            intersection.enum_complement(db).is_some()
+                && KnownComparisonSemantics::of_type(db, ty, operator).is_some()
+        }
+        Type::NominalInstance(instance) => {
+            instance.has_known_class(db, KnownClass::Bool)
+                || (enum_metadata(db, instance.class_literal(db)).is_some()
+                    && KnownComparisonSemantics::of_type(db, ty, operator).is_some())
+        }
+        _ => false,
+    }
+}
+
+fn finite_comparison_domain(
+    db: &dyn Db,
+    ty: Type,
+    operator: ComparisonOperator,
+) -> FiniteComparisonDomain {
+    match ty {
+        Type::Union(union) => {
+            let mut has_finite = false;
+            let mut has_open = false;
+            for element in union.elements(db) {
+                match finite_comparison_domain(db, *element, operator) {
+                    FiniteComparisonDomain::None => has_open = true,
+                    FiniteComparisonDomain::Finite => has_finite = true,
+                    FiniteComparisonDomain::Mixed => return FiniteComparisonDomain::Mixed,
+                }
+            }
+            match (has_finite, has_open) {
+                (true, true) => FiniteComparisonDomain::Mixed,
+                (true, false) => FiniteComparisonDomain::Finite,
+                (false, _) => FiniteComparisonDomain::None,
+            }
+        }
+        Type::EnumComplement(_) => {
+            if KnownComparisonSemantics::of_type(db, ty, operator).is_some() {
+                FiniteComparisonDomain::Finite
+            } else {
+                FiniteComparisonDomain::None
+            }
+        }
+        Type::Intersection(intersection) => {
+            if intersection.enum_complement(db).is_some()
+                && KnownComparisonSemantics::of_type(db, ty, operator).is_some()
+            {
+                FiniteComparisonDomain::Finite
+            } else {
+                FiniteComparisonDomain::None
+            }
+        }
+        _ if finite_comparison_key(db, ty, operator).is_some() => FiniteComparisonDomain::Finite,
+        Type::NominalInstance(instance) => {
+            if instance.has_known_class(db, KnownClass::Bool)
+                || (enum_metadata(db, instance.class_literal(db)).is_some()
+                    && KnownComparisonSemantics::of_type(db, ty, operator).is_some())
+            {
+                FiniteComparisonDomain::Finite
+            } else {
+                FiniteComparisonDomain::None
+            }
+        }
+        _ => FiniteComparisonDomain::None,
+    }
+}
+
 /// Expand a type into its finite runtime alternatives when its comparison semantics are known.
 ///
 /// Enum classes with custom comparison methods are deliberately not expanded because their members
@@ -855,6 +1099,23 @@ fn finite_alternatives<'db>(
     operator: ComparisonOperator,
 ) -> Option<Vec<Type<'db>>> {
     match ty {
+        Type::Union(union) => {
+            let mut alternatives = Vec::new();
+            let mut expanded_finite_domain = false;
+            for element in union.elements(db) {
+                if let Some(element_alternatives) = finite_alternatives(db, *element, operator) {
+                    alternatives.extend(element_alternatives);
+                    expanded_finite_domain = true;
+                } else {
+                    alternatives.push(*element);
+                }
+            }
+            (expanded_finite_domain
+                || alternatives
+                    .iter()
+                    .all(|alternative| finite_comparison_key(db, *alternative, operator).is_some()))
+            .then_some(alternatives)
+        }
         Type::EnumComplement(complement) => KnownComparisonSemantics::of_type(db, ty, operator)
             .is_some()
             .then(|| complement.remaining_literal_types(db)),
