@@ -907,6 +907,9 @@ fn evaluate_intersection_left<'db>(
     }
 }
 
+/// Compare two finite lists of possible runtime values without evaluating every pair.
+///
+/// This handles types such as enums and `bool`, whose possible values can be enumerated.
 fn evaluate_finite_domains<'db>(
     evaluator: &mut ComparisonEvaluator<'db>,
     left: &[Type<'db>],
@@ -949,6 +952,10 @@ fn evaluate_finite_domains<'db>(
     })
 }
 
+/// Return the type used to group values that are known to compare equal.
+///
+/// For example, `True`, `1`, and an `IntEnum` member with value `1` all use `Literal[1]`.
+/// Returns `None` when comparison behavior is not known precisely enough.
 fn finite_comparison_key<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
@@ -998,6 +1005,7 @@ fn finite_comparison_key<'db>(
     }
 }
 
+/// Whether a type can use finite-domain comparison entirely, partly, or not at all.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum FiniteComparisonDomain {
     None,
@@ -1005,6 +1013,7 @@ enum FiniteComparisonDomain {
     Mixed,
 }
 
+/// Return whether finite-domain expansion avoids a Cartesian product with an open union.
 fn finite_domain_expansion_is_bounded(
     db: &dyn Db,
     target: Type,
@@ -1089,7 +1098,7 @@ fn finite_comparison_domain(
     }
 }
 
-/// Expand a type into its finite runtime alternatives when its comparison semantics are known.
+/// Expand known finite domains while preserving unexpanded union elements.
 ///
 /// Enum classes with custom comparison methods are deliberately not expanded because their members
 /// may compare equal to values outside the enum domain.
