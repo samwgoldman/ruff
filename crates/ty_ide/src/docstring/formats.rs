@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 
 pub(super) mod google;
+pub(super) mod numpy;
 pub(super) mod rst;
 
 /// Encapsulates the set of docstring formats for which we support the following
@@ -12,20 +13,25 @@ pub(super) struct Formats<'a> {
     rst: rst::Docstring,
     google: google::Docstring<'a>,
     google_parameter_documentation: IndexMap<String, String>,
+    numpy_parameter_documentation: IndexMap<String, String>,
 }
 
 impl<'a> Formats<'a> {
     /// Parses all supported formats in the given docstring.
     pub(super) fn parse(raw: &'a str) -> Self {
-        // Google parameter docs historically use PEP 257-trimmed input. Keep
-        // them separate from the Google parse used for Markdown section ranges.
+        // Google and NumPy parameter docs historically use PEP 257-trimmed input.
+        // Keep them separate from parses used for Markdown section ranges.
+        let trimmed = super::documentation_trim(raw);
         let google_parameter_documentation =
-            google::Docstring::parse(&super::documentation_trim(raw)).parameter_documentation();
+            google::Docstring::parse(&trimmed).parameter_documentation();
+        let numpy_parameter_documentation =
+            numpy::Docstring::parse(&trimmed).parameter_documentation();
 
         Self {
             rst: rst::Docstring::parse(raw),
             google: google::Docstring::parse(raw),
             google_parameter_documentation,
+            numpy_parameter_documentation,
         }
     }
 
@@ -33,6 +39,11 @@ impl<'a> Formats<'a> {
     pub(super) fn parameter_documentation(&self) -> IndexMap<String, String> {
         let mut parameters = self.rst.parameter_documentation();
         for (name, description) in &self.google_parameter_documentation {
+            parameters
+                .entry(name.clone())
+                .or_insert_with(|| description.clone());
+        }
+        for (name, description) in &self.numpy_parameter_documentation {
             parameters
                 .entry(name.clone())
                 .or_insert_with(|| description.clone());
