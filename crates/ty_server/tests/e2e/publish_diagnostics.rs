@@ -11,6 +11,7 @@ use ruff_db::system::SystemPath;
 use ty_server::ClientOptions;
 
 use crate::TestServerBuilder;
+use crate::notebook::NotebookBuilder;
 
 #[test]
 fn on_did_open() -> Result<()> {
@@ -214,6 +215,75 @@ def foo() -> str:
     assert_eq!(diagnostics.version, Some(2));
 
     insta::assert_debug_snapshot!(diagnostics);
+
+    Ok(())
+}
+
+#[test]
+fn on_did_save_publishes_open_file_documents() -> Result<()> {
+    let workspace_root = SystemPath::new("src");
+    let lib = SystemPath::new("src/lib.py");
+    let main = SystemPath::new("src/main.py");
+
+    let lib_content = "x: str = ''\n";
+    let main_content = "\
+from typing import assert_type
+from lib import x
+
+assert_type(x, str)
+";
+
+    let mut server = TestServerBuilder::new()?
+        .with_workspace(workspace_root, None)?
+        .with_file(lib, lib_content)?
+        .with_file(main, main_content)?
+        .enable_pull_diagnostics(false)
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    server.open_text_document(lib, lib_content, 1);
+    server.await_notification::<PublishDiagnosticsNotification>();
+
+    server.open_text_document(main, main_content, 1);
+    server.await_notification::<PublishDiagnosticsNotification>();
+
+    let mut notebook = NotebookBuilder::virtual_file("src/notebook.ipynb");
+    notebook.add_python_cell("from lib import x\n");
+    notebook.add_python_cell(
+        "\
+from typing import assert_type
+
+assert_type(x, str)
+",
+    );
+    notebook.open(&mut server);
+    // Opening the notebook publishes diagnostics for both notebook cells:
+    // `src/notebook.ipynb#0` and `src/notebook.ipynb#1`.
+    server.collect_publish_diagnostic_notifications(2);
+
+    server.change_text_document(
+        lib,
+        vec![
+            lsp_types::TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+                TextDocumentContentChangeWholeDocument {
+                    text: "x: int = 1\n".to_string(),
+                },
+            ),
+        ],
+        2,
+    );
+    // Drain the diagnostics for `src/lib.py` triggered by `textDocument/didChange`
+    // before asserting on the diagnostics triggered by `textDocument/didSave`.
+    server.await_notification::<PublishDiagnosticsNotification>();
+
+    server.save_text_document(lib);
+
+    // Saving `src/lib.py` publishes four diagnostic notifications:
+    // - one for `src/lib.py`,
+    // - one for `src/main.py`, and
+    // - two for `src/notebook.ipynb`, one per notebook cell (`#0` and `#1`).
+    let diagnostics = server.collect_publish_diagnostic_notifications(4);
+    insta::assert_json_snapshot!(diagnostics);
 
     Ok(())
 }
