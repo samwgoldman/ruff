@@ -9,6 +9,7 @@
 mod formats;
 mod markdown;
 mod preformatted;
+mod sections;
 
 use formats::Formats;
 use indexmap::IndexMap;
