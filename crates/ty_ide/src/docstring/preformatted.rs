@@ -17,6 +17,16 @@ pub(super) struct PreformattedBlockScanner<'a> {
 const QUOTED_LITERAL_BLOCK_QUOTE_CHARACTERS: &str = r##"!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"##;
 
 impl<'a> PreformattedBlockScanner<'a> {
+    /// Returns whether the scanner is currently inside an accepted preformatted block.
+    pub(super) fn is_active(&self) -> bool {
+        self.active_markdown_fence.is_some()
+            || self.active_doctest
+            || matches!(
+                self.rest_literal_blocks.state,
+                RestLiteralBlockState::Active(_)
+            )
+    }
+
     /// Updates internal state to reflect the given line and returns whether or
     /// not the given line is contained within a preformatted block.
     pub(super) fn consume_preformatted_line(&mut self, line: &'a str) -> bool {
@@ -52,7 +62,7 @@ impl<'a> PreformattedBlockScanner<'a> {
     }
 
     /// Updates internal state for a line outside of any active preformatted block.
-    pub(super) fn observe_line_outside_preformatted_block(&mut self, line: &str) {
+    pub(super) fn observe_non_preformatted_line(&mut self, line: &str) {
         self.rest_literal_blocks.observe_marker_in_line(line);
     }
 
