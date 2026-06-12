@@ -12,6 +12,7 @@ pub(super) mod rst;
 pub(super) struct Formats<'a> {
     rst: rst::Docstring,
     google: google::Docstring<'a>,
+    numpy: numpy::Docstring<'a>,
     google_parameter_documentation: IndexMap<String, String>,
     numpy_parameter_documentation: IndexMap<String, String>,
 }
@@ -30,6 +31,7 @@ impl<'a> Formats<'a> {
         Self {
             rst: rst::Docstring::parse(raw),
             google: google::Docstring::parse(raw),
+            numpy: numpy::Docstring::parse(raw),
             google_parameter_documentation,
             numpy_parameter_documentation,
         }
@@ -58,5 +60,9 @@ impl<'a> Formats<'a> {
 
     pub(super) fn google(&self) -> &google::Docstring<'a> {
         &self.google
+    }
+
+    pub(super) fn numpy(&self) -> &numpy::Docstring<'a> {
+        &self.numpy
     }
 }

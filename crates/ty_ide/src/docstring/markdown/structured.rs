@@ -3,11 +3,12 @@ use std::borrow::Cow;
 use ruff_text_size::{TextRange, TextSize};
 
 mod google;
+mod numpy;
 mod rst;
 
 use super::super::formats::Formats;
 use super::super::parsing::{ParsedLine, indentation};
-use super::super::preformatted::RestLiteralBlockScanner;
+use super::super::preformatted::{PreformattedBlockScanner, RestLiteralBlockScanner};
 use super::super::sections::{
     Section, SectionItem, SectionKind, line_starts_markdown_block_content,
     render_boundary_after_description,
@@ -214,6 +215,7 @@ trait SectionSource {
 fn parse_blocks<'a>(raw: &'a str, formats: &Formats<'_>) -> Vec<Segment<'a>> {
     let mut sections = formats.rst().structured_sections();
     sections.extend(formats.google().structured_sections());
+    sections.extend(formats.numpy().structured_sections());
     parse_section_blocks(raw, sections)
 }
 
@@ -310,8 +312,20 @@ pub(super) fn parse_named_items(
     let mut items = Vec::new();
     let mut current: Option<SectionItemBuilder> = None;
     let mut item_indent = None;
+    let mut preformatted_blocks = PreformattedBlockScanner::default();
 
     for line in body {
+        if preformatted_blocks.consume_preformatted_line(line.text) {
+            let item_indent = item_indent?;
+            if !line.text.trim().is_empty() && indentation(line.text) <= item_indent {
+                return None;
+            }
+
+            let current = current.as_mut()?;
+            current.push_description(line.text);
+            continue;
+        }
+
         let trimmed = line.text.trim();
         if trimmed.is_empty() {
             if let Some(current) = &mut current {
@@ -327,6 +341,7 @@ pub(super) fn parse_named_items(
                     items.push(current.finish(kind));
                 }
                 item_indent.get_or_insert(line_indent);
+                preformatted_blocks.observe_non_preformatted_line(line.text);
                 continue;
             }
             if item_indent.is_some() {
@@ -339,6 +354,7 @@ pub(super) fn parse_named_items(
 
         let current = current.as_mut()?;
         current.push_description(line.text);
+        preformatted_blocks.observe_non_preformatted_line(line.text);
     }
 
     if let Some(current) = current {
@@ -902,6 +918,198 @@ Args:
 Args:
     nested = 1
         ```
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+    }
+
+    #[test]
+    fn numpy_sections_render_markdown_sections() {
+        let docstring = "\
+Summary.
+
+Parameters
+----------
+value, alias : str
+    The value.
+other
+    Another value.
+
+Other Parameters
+----------------
+kw_only : str, optional
+    Less common option.
+
+Returns
+-------
+    result : bool
+        Whether validation passed.
+
+Yields
+------
+    int
+        Next value.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        Summary.
+
+        ## Parameters
+        ```python
+        value, alias: str
+        ```
+        The value.
+
+        ```python
+        other
+        ```
+        Another value.
+
+        ## Other Parameters
+        ```python
+        kw_only: str, optional
+        ```
+        Less common option.
+
+        ## Returns
+        ```python
+        result: bool
+        ```
+        Whether validation passed.
+
+        ## Yields
+        ```python
+        int
+        ```
+        Next value.
+        ");
+
+        let docstring = "\
+Summary.
+
+Parameters
+----------
+value: str
+    The value.
+
+Returns
+-------
+result: bool
+    Whether validation passed.
+
+Yields
+------
+item: int
+    Next value.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        Summary.
+
+        ## Parameters
+        ```python
+        value: str
+        ```
+        The value.
+
+        ## Returns
+        ```python
+        result: bool
+        ```
+        Whether validation passed.
+
+        ## Yields
+        ```python
+        item: int
+        ```
+        Next value.
+        ");
+
+        let docstring = "\
+Summary.
+
+Returns
+-------
+    :obj:`list` of :obj:`str`
+        Primary values.
+    list of node-like
+        Related nodes.
+
+Yields
+------
+    :class:`Iterator` of :obj:`str`
+        Next labels.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        Summary.
+
+        ## Returns
+        ```python
+        :obj:`list` of :obj:`str`
+        ```
+        Primary values.
+
+        ```python
+        list of node-like
+        ```
+        Related nodes.
+
+        ## Yields
+        ```python
+        :class:`Iterator` of :obj:`str`
+        ```
+        Next labels.
+        ");
+    }
+
+    #[test]
+    fn unsupported_numpy_sections_stay_raw() {
+        let docstring = "\
+Summary.
+
+Returns
+-------
+    The created object.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Parameters
+----------
+value : str
+    Example:
+    ```python
+other : str
+    ```
+other : int
+    Real parameter.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+    }
+
+    #[test]
+    fn indented_sections_stay_raw() {
+        let docstring = "\
+Summary.
+
+    Args:
+        value: The value.
+
+    Parameters
+    ----------
+    other : str
+        Another value.
 ";
         let parsed = parse_docstring(docstring);
 

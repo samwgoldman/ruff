@@ -1523,40 +1523,216 @@ Args:
         assert_snapshot!(docstring.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Parameters<HB>
-        ----------<HB>
-        param1 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The first parameter description<HB>
-        param2, param4 : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The shared parameter description<HB>
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter description<HB>
         <HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;This is a second paragraph.<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of the shared description.<HB>
-        param3<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;A parameter without type annotation<HB>
-        *args : object<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;Extra positional arguments<HB>
-        **kwargs : object<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;Extra keyword arguments<HB>
-        options.mode : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;Nested field documentation<HB>
-        π : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;A Unicode parameter<HB>
+        ```python
+        param2, param4: int
+        ```<HB>
+        The shared parameter description<HB>
         <HB>
-        Other Parameters<HB>
-        ----------------<HB>
-        kw\\_only : str, optional<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;A less commonly used keyword-only parameter<HB>
+        This is a second paragraph. This is a continuation of the shared description.<HB>
         <HB>
+        ```python
+        param3
+        ```<HB>
+        A parameter without type annotation<HB>
+        <HB>
+        ```python
+        *args: object
+        ```<HB>
+        Extra positional arguments<HB>
+        <HB>
+        ```python
+        **kwargs: object
+        ```<HB>
+        Extra keyword arguments<HB>
+        <HB>
+        ```python
+        options.mode: str
+        ```<HB>
+        Nested field documentation<HB>
+        <HB>
+        ```python
+        π: int
+        ```<HB>
+        A Unicode parameter<HB>
+        <HB>
+        ## Other Parameters<HB>
+        ```python
+        kw_only: str, optional
+        ```<HB>
+        A less commonly used keyword-only parameter<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```<HB>
+        The return value description<HB>
+        <HB>
+        ## Yields<HB>
+        ```python
+        int
+        ```<HB>
+        The next value
+        ");
+    }
+
+    #[test]
+    fn numpy_sections_render_edge_cases() {
+        let _snap = bind_docstring_snapshot_filters();
+        let docstring = Docstring::new(
+            "\
+Attributes
+----------
+name : str
+    Display name.
+Note: deprecated
+
+Raises
+------
+ValueError
+    If invalid.
+TypeError : If wrong type.
+RuntimeError : If unavailable.
+    Retry later.
+This paragraph is not an exception."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        ## Attributes<HB>
+        ```python
+        name: str
+        ```<HB>
+        Display name.<HB>
+        Note: deprecated<HB>
+        <HB>
+        ## Raises<HB>
+        ```python
+        ValueError
+        ```<HB>
+        If invalid.<HB>
+        <HB>
+        ```python
+        TypeError
+        ```<HB>
+        If wrong type.<HB>
+        <HB>
+        ```python
+        RuntimeError
+        ```<HB>
+        If unavailable. Retry later.<HB>
+        This paragraph is not an exception.
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Parameters
+----------
+name : str
+    Display name.
+    if name:
+        return name
+Note: this paragraph is not a parameter.
+
+Returns
+-------
+str
+    Display result.
+Note: deprecated"
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        ## Parameters<HB>
+        ```python
+        name: str
+        ```<HB>
+        Display name.<HB>
+        if name:<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;return name<HB>
+        Note: this paragraph is not a parameter.<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```<HB>
+        Display result.<HB>
+        Note: deprecated
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Parameters
+----------
+value : int
+    Example.
+    >>> value
+    1
+
+Returns
+-------
+bool
+    Done."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        ## Parameters<HB>
+        ```python
+        value: int
+        ```<HB>
+        Example.<HB>
+        ```````````python
+        >>> value
+        1
+        ```````````<HB>
+        ## Returns<HB>
+        ```python
+        bool
+        ```<HB>
+        Done.
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Returns
+-------
+Literal[\"header : value\", \"http://\"]
+    First paragraph.
+
+    Second paragraph."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @r#"
+        ## Returns<HB>
+        ```python
+        Literal["header : value", "http://"]
+        ```<HB>
+        First paragraph.<HB>
+        <HB>
+        Second paragraph.
+        "#);
+
+        let docstring = Docstring::new(
+            "\
+Returns
+-------
+ctypes.cdll[libpath] : library object
+    A ctypes library object."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
         Returns<HB>
         -------<HB>
-        str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The return value description<HB>
-        <HB>
-        Yields<HB>
-        ------<HB>
-        int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The next value
+        ctypes.cdll[libpath] : library object<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;A ctypes library object.
         ");
     }
 
@@ -1693,10 +1869,11 @@ Args:
         ```<HB>
         Another Google-style parameter<HB>
         <HB>
-        Parameters<HB>
-        ----------<HB>
-        param3 : bool<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;NumPy-style parameter
+        ## Parameters<HB>
+        ```python
+        param3: bool
+        ```<HB>
+        NumPy-style parameter
         ");
     }
 
@@ -1916,12 +2093,16 @@ Args:
         ```<HB>
         Another reST-style parameter<HB>
         <HB>
-        Parameters<HB>
-        ----------<HB>
-        param3 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;NumPy-style duplicate parameter<HB>
-        param4 : bool<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;NumPy-style parameter
+        ## Parameters<HB>
+        ```python
+        param3: str
+        ```<HB>
+        NumPy-style duplicate parameter<HB>
+        <HB>
+        ```python
+        param4: bool
+        ```<HB>
+        NumPy-style parameter
         ");
     }
 
@@ -1986,20 +2167,27 @@ Args:
         assert_snapshot!(docstring.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Parameters<HB>
-        ----------<HB>
-        param1 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The first parameter description<HB>
-        param2 : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The second parameter description<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of param2 description.<HB>
-        param3<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;A parameter without type annotation<HB>
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter description<HB>
         <HB>
-        Returns<HB>
-        -------<HB>
-        str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;The return value description
+        ```python
+        param2: int
+        ```<HB>
+        The second parameter description This is a continuation of param2 description.<HB>
+        <HB>
+        ```python
+        param3
+        ```<HB>
+        A parameter without type annotation<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```<HB>
+        The return value description
         ");
     }
 
@@ -2055,15 +2243,21 @@ Args:
         assert_snapshot!(docstring.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Parameters<HB>
-        ----------<HB>
-        param1 : str<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The first parameter description<HB>
-        param2 : int<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The second parameter description<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of param2 description.<HB>
-        param3<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;A parameter without type annotation
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter description<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        The second parameter description This is a continuation of param2 description.<HB>
+        <HB>
+        ```python
+        param3
+        ```<HB>
+        A parameter without type annotation
         ");
     }
 

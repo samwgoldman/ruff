@@ -4,6 +4,7 @@ use ruff_text_size::TextRange;
 
 use crate::docstring::parsing::{
     ParsedLine, indentation, is_docstring_type_expression, parsed_lines,
+    split_once_unbracketed_colon,
 };
 use crate::docstring::preformatted::PreformattedBlockScanner;
 use crate::docstring::sections::SectionKind;
@@ -18,7 +19,6 @@ impl<'a> Docstring<'a> {
         Self { sections }
     }
 
-    #[expect(dead_code, reason = "used by follow-up structured docstring renderer")]
     pub(in crate::docstring) fn sections(&self) -> &[Section<'a>] {
         &self.sections
     }
@@ -36,22 +36,14 @@ pub(in crate::docstring) struct Section<'a> {
 }
 
 impl<'a> Section<'a> {
-    #[expect(dead_code, reason = "used by follow-up structured docstring renderer")]
     pub(in crate::docstring) fn kind(&self) -> SectionKind {
         self.kind
     }
 
-    #[expect(dead_code, reason = "used by follow-up structured docstring renderer")]
-    pub(in crate::docstring) fn indent(&self) -> usize {
-        self.indent
-    }
-
-    #[expect(dead_code, reason = "used by follow-up structured docstring renderer")]
     pub(in crate::docstring) fn range(&self) -> TextRange {
         self.range
     }
 
-    #[expect(dead_code, reason = "used by follow-up structured docstring renderer")]
     pub(in crate::docstring) fn body(&self) -> &[ParsedLine<'a>] {
         &self.body
     }
@@ -233,8 +225,12 @@ fn is_numpy_underline(line: &str) -> bool {
 
 fn numpy_named_item_starts(line: &ParsedLine<'_>, following_lines: &[ParsedLine<'_>]) -> bool {
     let trimmed = line.text.trim();
-    split_numpy_type_separator(trimmed).is_some()
-        || numpy_untyped_item_starts(trimmed, line, following_lines)
+    if let Some(separator) = parse_numpy_type_separator(trimmed) {
+        return !separator.requires_description_block
+            || has_indented_description(line, following_lines);
+    }
+
+    numpy_untyped_item_starts(trimmed, line, following_lines)
 }
 
 fn numpy_untyped_item_starts(
@@ -242,11 +238,7 @@ fn numpy_untyped_item_starts(
     line: &ParsedLine<'_>,
     following_lines: &[ParsedLine<'_>],
 ) -> bool {
-    is_numpy_item_name(trimmed)
-        && following_lines
-            .iter()
-            .find(|line| !line.text.trim().is_empty())
-            .is_some_and(|next| indentation(next.text) > indentation(line.text))
+    is_numpy_item_name(trimmed) && has_indented_description(line, following_lines)
 }
 
 fn numpy_return_item_starts(
@@ -255,23 +247,20 @@ fn numpy_return_item_starts(
     following_lines: &[ParsedLine<'_>],
 ) -> bool {
     let trimmed = line.text.trim();
-    parse_numpy_named_return_item(trimmed).is_some()
-        || (!previous_lines
-            .iter()
-            .any(|line| !line.text.trim().is_empty())
-            && is_numpy_anonymous_return_type(trimmed))
+    if let Some(separator) = parse_numpy_type_separator(trimmed) {
+        return !separator.requires_description_block
+            || has_indented_description(line, following_lines);
+    }
+
+    (!previous_lines
+        .iter()
+        .any(|line| !line.text.trim().is_empty())
+        && is_numpy_anonymous_return_type(trimmed))
         || (is_numpy_anonymous_return_type(trimmed)
-            && following_lines
-                .iter()
-                .find(|line| !line.text.trim().is_empty())
-                .is_some_and(|next| indentation(next.text) > indentation(line.text)))
+            && has_indented_description(line, following_lines))
 }
 
-fn parse_numpy_named_return_item(line: &str) -> Option<(&str, &str)> {
-    split_numpy_type_separator(line)
-}
-
-fn is_numpy_anonymous_return_type(line: &str) -> bool {
+pub(in crate::docstring) fn is_numpy_anonymous_return_type(line: &str) -> bool {
     !line.is_empty()
         && !line.ends_with('.')
         && !line.ends_with(':')
@@ -396,11 +385,23 @@ fn insert_parameter_group(
     }
 }
 
-fn split_numpy_type_separator(line: &str) -> Option<(&str, &str)> {
-    let (name, ty) = line.split_once(':')?;
-    if !name.chars().last().is_some_and(char::is_whitespace)
-        && !ty.chars().next().is_some_and(char::is_whitespace)
-    {
+pub(in crate::docstring) fn split_numpy_type_separator(line: &str) -> Option<(&str, &str)> {
+    let separator = parse_numpy_type_separator(line)?;
+    Some((separator.name, separator.ty))
+}
+
+struct NumpyTypeSeparator<'a> {
+    name: &'a str,
+    ty: &'a str,
+    // Same-indent `name: type` is ambiguous with prose like `Note: deprecated`.
+    requires_description_block: bool,
+}
+
+fn parse_numpy_type_separator(line: &str) -> Option<NumpyTypeSeparator<'_>> {
+    let (name, ty) = split_once_unbracketed_colon(line)?;
+    let has_whitespace_before_colon = name.chars().last().is_some_and(char::is_whitespace);
+    let has_whitespace_after_colon = ty.chars().next().is_some_and(char::is_whitespace);
+    if !has_whitespace_before_colon && !has_whitespace_after_colon {
         return None;
     }
 
@@ -409,11 +410,25 @@ fn split_numpy_type_separator(line: &str) -> Option<(&str, &str)> {
     if !is_numpy_item_name(name) || ty.is_empty() {
         return None;
     }
+    if !has_whitespace_before_colon && !is_docstring_type_expression(ty) {
+        return None;
+    }
 
-    Some((name, ty))
+    Some(NumpyTypeSeparator {
+        name,
+        ty,
+        requires_description_block: !has_whitespace_before_colon,
+    })
 }
 
-fn is_numpy_item_name(name: &str) -> bool {
+fn has_indented_description(line: &ParsedLine<'_>, following_lines: &[ParsedLine<'_>]) -> bool {
+    following_lines
+        .iter()
+        .find(|line| !line.text.trim().is_empty())
+        .is_some_and(|next| indentation(next.text) > indentation(line.text))
+}
+
+pub(in crate::docstring) fn is_numpy_item_name(name: &str) -> bool {
     name.split(',').all(|part| {
         let part = part.trim();
         let part = part
