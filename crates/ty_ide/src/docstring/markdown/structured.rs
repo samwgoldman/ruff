@@ -2,17 +2,20 @@ use std::borrow::Cow;
 
 use ruff_text_size::{TextRange, TextSize};
 
+mod google;
 mod rst;
 
 use super::super::formats::Formats;
+use super::super::parsing::{ParsedLine, indentation};
 use super::super::preformatted::RestLiteralBlockScanner;
 use super::super::sections::{
-    Section, line_starts_markdown_block_content, render_boundary_after_description,
+    Section, SectionItem, SectionKind, line_starts_markdown_block_content,
+    render_boundary_after_description,
 };
 
 /// Accepts a PEP 257-trimmed docstring body and renders Markdown for sections
 /// recognized in supported formats.
-pub(super) fn render<'a>(body: &'a str, formats: &Formats) -> Cow<'a, str> {
+pub(super) fn render<'a>(body: &'a str, formats: &Formats<'_>) -> Cow<'a, str> {
     Docstring::parse(body, formats).render_markdown()
 }
 
@@ -26,7 +29,7 @@ struct Docstring<'a> {
 
 impl<'a> Docstring<'a> {
     /// Factory method that parses `source` into blocks for Markdown rendering.
-    fn parse(source: &'a str, formats: &Formats) -> Self {
+    fn parse(source: &'a str, formats: &Formats<'_>) -> Self {
         Self {
             source,
             segments: parse_blocks(source, formats),
@@ -208,8 +211,10 @@ trait SectionSource {
 ///
 /// Returns an empty list when there are no structural replacements to apply,
 /// or when an invalid range should trigger a fall back to the original docstring.
-fn parse_blocks<'a>(raw: &'a str, formats: &Formats) -> Vec<Segment<'a>> {
-    parse_section_blocks(raw, formats.rst().structured_sections())
+fn parse_blocks<'a>(raw: &'a str, formats: &Formats<'_>) -> Vec<Segment<'a>> {
+    let mut sections = formats.rst().structured_sections();
+    sections.extend(formats.google().structured_sections());
+    parse_section_blocks(raw, sections)
 }
 
 fn parse_section_blocks(raw: &str, mut sections: Vec<Section>) -> Vec<Segment<'_>> {
@@ -260,6 +265,159 @@ fn push_raw_block<'a>(blocks: &mut Vec<Segment<'a>>, raw: &'a str, range: TextRa
     };
     blocks.push(Segment::Raw(raw));
     true
+}
+
+pub(super) struct SectionItemBuilder {
+    display_name: Option<String>,
+    ty: Option<String>,
+    description_lines: Vec<DescriptionLine>,
+}
+
+impl SectionItemBuilder {
+    pub(super) fn finish(self, kind: SectionKind) -> SectionItem {
+        let description = normalize_description(self.description_lines);
+        SectionItem::new(
+            kind,
+            self.display_name.as_deref(),
+            self.ty.as_deref(),
+            &description,
+        )
+    }
+
+    pub(super) fn push_description(&mut self, line: &str) {
+        self.description_lines
+            .push(DescriptionLine::Source(line.to_string()));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DescriptionLine {
+    Normalized(String),
+    Source(String),
+}
+
+impl DescriptionLine {
+    pub(super) fn normalized(line: &str) -> Self {
+        Self::Normalized(line.trim().to_string())
+    }
+}
+
+pub(super) fn parse_named_items(
+    kind: SectionKind,
+    body: &[ParsedLine<'_>],
+    mut parse_item: impl FnMut(&str) -> Option<SectionItemBuilder>,
+) -> Option<Vec<SectionItem>> {
+    let mut items = Vec::new();
+    let mut current: Option<SectionItemBuilder> = None;
+    let mut item_indent = None;
+
+    for line in body {
+        let trimmed = line.text.trim();
+        if trimmed.is_empty() {
+            if let Some(current) = &mut current {
+                current.push_description("");
+            }
+            continue;
+        }
+
+        let line_indent = indentation(line.text);
+        if item_indent.is_none_or(|indent| line_indent == indent) {
+            if let Some(item) = parse_item(trimmed) {
+                if let Some(current) = current.replace(item) {
+                    items.push(current.finish(kind));
+                }
+                item_indent.get_or_insert(line_indent);
+                continue;
+            }
+            if item_indent.is_some() {
+                return None;
+            }
+        }
+        if item_indent.is_some_and(|indent| line_indent < indent) {
+            return None;
+        }
+
+        let current = current.as_mut()?;
+        current.push_description(line.text);
+    }
+
+    if let Some(current) = current {
+        items.push(current.finish(kind));
+    }
+    (!items.is_empty()).then_some(items)
+}
+
+pub(super) fn is_uri_scheme_prefix(ty: &str, description: &str) -> bool {
+    if !is_uri_scheme(ty) {
+        return false;
+    }
+
+    let Some(first) = description.chars().next() else {
+        return false;
+    };
+    if first.is_whitespace() {
+        return false;
+    }
+
+    matches!(first, '/' | '?' | '#' | '@' | ':')
+}
+
+fn is_uri_scheme(scheme: &str) -> bool {
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|char| char.is_ascii_alphabetic())
+        && chars.all(|char| char.is_ascii_alphanumeric() || matches!(char, '+' | '-' | '.'))
+}
+
+pub(super) fn normalize_description(lines: Vec<DescriptionLine>) -> String {
+    let dedent = lines
+        .iter()
+        .filter_map(|line| match line {
+            DescriptionLine::Source(line) if !line.trim().is_empty() => Some(indentation(line)),
+            DescriptionLine::Normalized(_) | DescriptionLine::Source(_) => None,
+        })
+        .min()
+        .unwrap_or(0);
+
+    let mut description = lines
+        .into_iter()
+        .map(|line| match line {
+            DescriptionLine::Normalized(line) => line,
+            DescriptionLine::Source(line) => {
+                strip_indentation(&line, dedent).trim_end().to_string()
+            }
+        })
+        .skip_while(String::is_empty)
+        .collect::<Vec<_>>();
+    while description.last().is_some_and(String::is_empty) {
+        description.pop();
+    }
+    let description = description.join("\n");
+    match normalize_prose_soft_line_breaks(&description) {
+        Cow::Borrowed(_) => description,
+        Cow::Owned(description) => description,
+    }
+}
+
+pub(super) fn strip_indentation(line: &str, width: usize) -> &str {
+    let mut indentation_width = 0;
+    for (index, char) in line.char_indices() {
+        let char_width = match char {
+            ' ' => 1,
+            '\t' => 8,
+            _ => return &line[index..],
+        };
+
+        if indentation_width + char_width > width {
+            return &line[index..];
+        }
+
+        indentation_width += char_width;
+        if indentation_width == width {
+            return &line[index + char.len_utf8()..];
+        }
+    }
+
+    ""
 }
 
 #[cfg(test)]
@@ -364,6 +522,393 @@ too.
     }
 
     #[test]
+    fn google_sections_render_markdown_sections() {
+        let docstring = "\
+Summary.
+
+Args:
+    value (str): The value.
+        More detail.
+    *items: Extra items.
+
+Keyword Args:
+    optional (int): Optional value.
+
+Returns:
+    bool: Whether validation passed.
+
+Yields:
+    int: Next value.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        Summary.
+
+        ## Parameters
+        ```python
+        value: str
+        ```
+        The value. More detail.
+
+        ```python
+        *items
+        ```
+        Extra items.
+
+        ## Keyword Arguments
+        ```python
+        optional: int
+        ```
+        Optional value.
+
+        ## Returns
+        ```python
+        bool
+        ```
+        Whether validation passed.
+
+        ## Yields
+        ```python
+        int
+        ```
+        Next value.
+        ");
+
+        let docstring = "\
+Args:
+    x, y: Coordinates.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Parameters
+        ```python
+        x, y
+        ```
+        Coordinates.
+        ");
+
+        let docstring = "\
+Keyword Arguments:
+    retries: Retry count.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Keyword Arguments
+        ```python
+        retries
+        ```
+        Retry count.
+        ");
+
+        let docstring = "\
+Args:
+    value: The value.
+Additional details.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Parameters
+        ```python
+        value
+        ```
+        The value.
+        Additional details.
+        ");
+
+        let docstring = "\
+Args:
+    value: The value.
+Methods:
+    work: Does work.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Parameters
+        ```python
+        value
+        ```
+        The value.
+        Methods:
+            work: Does work.
+        ");
+
+        let docstring = "\
+Returns:
+    bool: Whether validation passed.
+Additional details.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        ```python
+        bool
+        ```
+        Whether validation passed.
+        Additional details.
+        ");
+
+        let docstring = "\
+Returns:
+    str | None: Optional value.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        ```python
+        str | None
+        ```
+        Optional value.
+        ");
+
+        let docstring = "\
+Returns:
+    One of the known values: foo or bar.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        One of the known values: foo or bar.
+        ");
+
+        let docstring = "\
+Returns:
+    True if it succeeded.
+    False otherwise.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        True if it succeeded. False otherwise.
+        ");
+
+        let docstring = "\
+Yields:
+    The next item.
+    Nothing when exhausted.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Yields
+        The next item. Nothing when exhausted.
+        ");
+
+        let docstring = "\
+Returns:
+    str:Path/to/file.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        ```python
+        str
+        ```
+        Path/to/file.
+        ");
+
+        let docstring = "\
+Returns:
+    Path:foo@bar.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        ```python
+        Path
+        ```
+        foo@bar.
+        ");
+
+        let docstring = "\
+Returns:
+    https://example.com/path
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        https://example.com/path
+        ");
+
+        let docstring = "\
+Yields:
+    :obj:`list` of :obj:`str`: Result chunks.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Yields
+        ```python
+        :obj:`list` of :obj:`str`
+        ```
+        Result chunks.
+        ");
+
+        let docstring = "\
+Returns:
+    str: Example output.
+        ```python
+        Args:
+            value: still code.
+        Returns:
+            still code.
+        ```
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Returns
+        ```python
+        str
+        ```
+        Example output.
+        ```python
+        Args:
+            value: still code.
+        Returns:
+            still code.
+        ```
+        ");
+
+        let docstring = "\
+Yields:
+    int: Example output.
+        Example::
+            Args:
+                still code.
+            Yields:
+                still code.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_snapshot!(parsed.render_markdown(), @"
+        ## Yields
+        ```python
+        int
+        ```
+        Example output.
+        Example::
+            Args:
+                still code.
+            Yields:
+                still code.
+        ");
+    }
+
+    #[test]
+    fn unsupported_google_sections_stay_raw() {
+        let docstring = "\
+Summary.
+
+Args:
+    Inputs are normalized first.
+    value: The value.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Examples:
+    Args:
+        value: demo input.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Returns:
+    bool: Whether validation passed.
+
+    Examples:
+        Use it.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Yields:
+    int: Next value.
+
+    Examples:
+        Use it.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Args:
+    Inputs are normalized first.
+    Args:
+        value: demo input.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Args:
+    value: The value.
+
+    Examples:
+        Use it.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Returns:
+    Examples:
+        Use it.
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+
+        let docstring = "\
+Summary.
+
+Args:
+    value: Example.
+        ```python
+
+Args:
+    nested = 1
+        ```
+";
+        let parsed = parse_docstring(docstring);
+
+        assert_eq!(parsed.render_markdown(), docstring);
+    }
+
+    #[test]
     fn following_prose_is_rendered_outside_a_parameter_doctest() {
         let rendered = render_docstring(":param value:\n    >>> value\n    1\nAfter.");
 
@@ -420,10 +965,12 @@ too.
     }
 
     fn render_docstring(docstring: &str) -> String {
-        let formats = Formats::parse(docstring);
-        Docstring::parse(docstring, &formats)
-            .render_markdown()
-            .into_owned()
+        parse_docstring(docstring).render_markdown().into_owned()
+    }
+
+    fn parse_docstring(raw: &str) -> Docstring<'_> {
+        let formats = Formats::parse(raw);
+        Docstring::parse(raw, &formats)
     }
 
     fn section_block(range: TextRange, items: Vec<SectionItem>) -> Section {

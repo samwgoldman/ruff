@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use ruff_python_stdlib::identifiers::is_identifier;
+use ruff_text_size::TextRange;
 
 use crate::docstring::parsing::{
     ParsedLine, indentation, parse_parenthesized_type, parsed_lines, split_once_unbracketed_colon,
@@ -7,30 +8,48 @@ use crate::docstring::parsing::{
 use crate::docstring::preformatted::PreformattedBlockScanner;
 use crate::docstring::sections::SectionKind;
 
-pub(in crate::docstring) struct Docstring {
-    parameters: IndexMap<String, String>,
+pub(in crate::docstring) struct Docstring<'a> {
+    sections: Vec<Section<'a>>,
 }
 
-impl Docstring {
-    pub(in crate::docstring) fn parse(raw: &str) -> Self {
-        let parameters = parse_parameter_documentation(raw);
-        Self { parameters }
+impl<'a> Docstring<'a> {
+    pub(in crate::docstring) fn parse(raw: &'a str) -> Self {
+        let sections = parse_sections(raw);
+        Self { sections }
+    }
+
+    pub(in crate::docstring) fn sections(&self) -> &[Section<'a>] {
+        &self.sections
     }
 
     pub(in crate::docstring) fn parameter_documentation(&self) -> IndexMap<String, String> {
-        self.parameters.clone()
+        parameter_documentation(&self.sections)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GoogleSectionKind {
-    Supported(SectionKind),
-    Unsupported,
+pub(in crate::docstring) struct Section<'a> {
+    kind: SectionKind,
+    range: TextRange,
+    body: Vec<ParsedLine<'a>>,
 }
 
-fn parse_parameter_documentation(raw: &str) -> IndexMap<String, String> {
+impl<'a> Section<'a> {
+    pub(in crate::docstring) fn kind(&self) -> SectionKind {
+        self.kind
+    }
+
+    pub(in crate::docstring) fn range(&self) -> TextRange {
+        self.range
+    }
+
+    pub(in crate::docstring) fn body(&self) -> &[ParsedLine<'a>] {
+        &self.body
+    }
+}
+
+fn parse_sections(raw: &str) -> Vec<Section<'_>> {
     let lines = parsed_lines(raw);
-    let mut parameters = IndexMap::new();
+    let mut sections = Vec::new();
     let mut preformatted_blocks = PreformattedBlockScanner::default();
     let mut index = 0;
 
@@ -50,32 +69,38 @@ fn parse_parameter_documentation(raw: &str) -> IndexMap<String, String> {
             continue;
         }
 
-        let body_end = google_section_body_end(&lines, header);
-        if matches!(
-            header.kind,
-            GoogleSectionKind::Supported(SectionKind::Parameters | SectionKind::KeywordArguments)
-        ) {
-            extend_parameter_documentation(&mut parameters, &lines[header.body_start..body_end]);
+        let (body_end, range) = google_section_body_end(&lines, header);
+        if let GoogleSectionKind::Supported(kind) = header.kind {
+            sections.push(Section {
+                kind,
+                range,
+                body: lines[header.body_start..body_end].to_vec(),
+            });
         }
         index = body_end;
     }
 
-    parameters
+    sections
 }
 
-fn google_section_body_end(lines: &[ParsedLine], header: GoogleSectionHeader) -> usize {
+fn google_section_body_end(
+    lines: &[ParsedLine<'_>],
+    header: GoogleSectionHeader,
+) -> (usize, TextRange) {
     let mut body_end = header.body_start;
+    let mut range = header.range;
     let mut body_preformatted_blocks = PreformattedBlockScanner::default();
 
-    while let Some(line) = lines.get(body_end).map(|line| line.text) {
+    while let Some(line) = lines.get(body_end) {
         if body_preformatted_blocks.is_active()
-            && body_preformatted_blocks.consume_preformatted_line(line)
+            && body_preformatted_blocks.consume_preformatted_line(line.text)
         {
+            range = TextRange::new(range.start(), line.range.end());
             body_end += 1;
             continue;
         }
 
-        if line.trim().is_empty()
+        if line.text.trim().is_empty()
             && !google_blank_line_continues_section(&lines[body_end..], header)
         {
             break;
@@ -85,20 +110,24 @@ fn google_section_body_end(lines: &[ParsedLine], header: GoogleSectionHeader) ->
             break;
         }
 
-        if !line.trim().is_empty() && !google_line_belongs_to_body(header, line) {
+        if !line.text.trim().is_empty() && !google_line_belongs_to_body(header, line.text) {
             break;
         }
 
-        if !body_preformatted_blocks.consume_preformatted_line(line) {
-            body_preformatted_blocks.observe_non_preformatted_line(line);
+        if !body_preformatted_blocks.consume_preformatted_line(line.text) {
+            body_preformatted_blocks.observe_non_preformatted_line(line.text);
         }
+        range = TextRange::new(range.start(), line.range.end());
         body_end += 1;
     }
 
-    body_end
+    (body_end, range)
 }
 
-fn google_blank_line_continues_section(lines: &[ParsedLine], header: GoogleSectionHeader) -> bool {
+fn google_blank_line_continues_section(
+    lines: &[ParsedLine<'_>],
+    header: GoogleSectionHeader,
+) -> bool {
     let Some((offset, non_blank_line)) = lines
         .iter()
         .enumerate()
@@ -115,7 +144,7 @@ fn google_blank_line_continues_section(lines: &[ParsedLine], header: GoogleSecti
 }
 
 fn google_section_header_ends_body(
-    lines: &[ParsedLine],
+    lines: &[ParsedLine<'_>],
     index: usize,
     header: GoogleSectionHeader,
 ) -> bool {
@@ -135,20 +164,27 @@ struct GoogleSectionHeader {
     kind: GoogleSectionKind,
     indent: usize,
     body_start: usize,
+    range: TextRange,
 }
 
 fn parse_google_section_like_header(
-    lines: &[ParsedLine],
+    lines: &[ParsedLine<'_>],
     index: usize,
 ) -> Option<GoogleSectionHeader> {
-    let line = lines.get(index)?.text;
-    let kind = google_section_kind(line)?;
+    let line = lines.get(index)?;
 
     Some(GoogleSectionHeader {
-        kind,
-        indent: indentation(line),
+        kind: google_section_kind(line.text)?,
+        indent: indentation(line.text),
         body_start: index + 1,
+        range: line.range,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoogleSectionKind {
+    Supported(SectionKind),
+    Unsupported,
 }
 
 fn google_section_kind(line: &str) -> Option<GoogleSectionKind> {
@@ -160,12 +196,19 @@ fn google_section_kind(line: &str) -> Option<GoogleSectionKind> {
         "keyword args" | "keyword arguments" => {
             GoogleSectionKind::Supported(SectionKind::KeywordArguments)
         }
-        "attributes" | "example" | "examples" | "note" | "notes" | "other parameters"
-        | "references" | "return" | "returns" | "raise" | "raises" | "see also" | "todo"
-        | "todos" | "warning" | "warnings" | "yield" | "yields" => GoogleSectionKind::Unsupported,
+        "attributes" => GoogleSectionKind::Supported(SectionKind::Attributes),
+        "return" | "returns" => GoogleSectionKind::Supported(SectionKind::Returns),
+        "yield" | "yields" => GoogleSectionKind::Supported(SectionKind::Yields),
+        "raise" | "raises" => GoogleSectionKind::Supported(SectionKind::Raises),
+        "example" | "examples" | "note" | "notes" | "other parameters" | "references"
+        | "see also" | "todo" | "todos" | "warning" | "warnings" => GoogleSectionKind::Unsupported,
         _ => return None,
     };
     Some(kind)
+}
+
+pub(in crate::docstring) fn is_section_like_header(line: &str) -> bool {
+    google_section_kind(line).is_some()
 }
 
 fn normalized_google_section_name(line: &str) -> Option<String> {
@@ -178,51 +221,61 @@ fn normalized_google_section_name(line: &str) -> Option<String> {
     )
 }
 
-fn parse_google_parameter(line: &str) -> Option<(String, String)> {
+fn parameter_documentation(sections: &[Section<'_>]) -> IndexMap<String, String> {
+    let mut parameters = IndexMap::new();
+
+    for section in sections.iter().filter(|section| {
+        matches!(
+            section.kind,
+            SectionKind::Parameters | SectionKind::KeywordArguments
+        )
+    }) {
+        let mut current: Option<(String, String)> = None;
+        let mut item_indent = None;
+
+        for line in &section.body {
+            let trimmed = line.text.trim();
+            let line_indent = indentation(line.text);
+
+            if trimmed.is_empty() {
+                if let Some(current) = &mut current {
+                    if !current.1.is_empty() && !current.1.ends_with('\n') {
+                        current.1.push('\n');
+                    }
+                    current.1.push('\n');
+                }
+                continue;
+            }
+
+            if item_indent.is_none_or(|indent| line_indent == indent)
+                && let Some(parameter) = parse_parameter_line(trimmed)
+            {
+                insert_parameter_documentation(&mut parameters, current.replace(parameter));
+                item_indent.get_or_insert(line_indent);
+                continue;
+            }
+
+            if let Some(current) = &mut current {
+                if !current.1.is_empty() && !current.1.ends_with('\n') {
+                    current.1.push('\n');
+                }
+                current.1.push_str(trimmed);
+            }
+        }
+
+        insert_parameter_documentation(&mut parameters, current);
+    }
+
+    parameters
+}
+
+fn parse_parameter_line(line: &str) -> Option<(String, String)> {
     let (name, description) = split_once_unbracketed_colon(line)?;
     let name = name.trim();
     let (display_name, _) = parse_parenthesized_type(name);
     let lookup_name = google_parameter_lookup_name(display_name)?;
 
     Some((lookup_name, description.trim().to_string()))
-}
-
-fn extend_parameter_documentation(parameters: &mut IndexMap<String, String>, lines: &[ParsedLine]) {
-    let mut current: Option<(String, String)> = None;
-    let mut item_indent = None;
-
-    for line in lines {
-        let line = line.text;
-        let trimmed = line.trim();
-        let line_indent = indentation(line);
-
-        if trimmed.is_empty() {
-            if let Some(current) = &mut current {
-                if !current.1.is_empty() && !current.1.ends_with('\n') {
-                    current.1.push('\n');
-                }
-                current.1.push('\n');
-            }
-            continue;
-        }
-
-        if item_indent.is_none_or(|indent| line_indent == indent)
-            && let Some(parameter) = parse_google_parameter(trimmed)
-        {
-            insert_parameter_documentation(parameters, current.replace(parameter));
-            item_indent.get_or_insert(line_indent);
-            continue;
-        }
-
-        if let Some(current) = &mut current {
-            if !current.1.is_empty() && !current.1.ends_with('\n') {
-                current.1.push('\n');
-            }
-            current.1.push_str(trimmed);
-        }
-    }
-
-    insert_parameter_documentation(parameters, current);
 }
 
 fn insert_parameter_documentation(

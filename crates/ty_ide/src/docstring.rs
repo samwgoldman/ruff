@@ -833,14 +833,14 @@ mod tests {
         assert_snapshot!(docstring.render_markdown(), @"
         My cool func...<HB>
         <HB>
-        Returns:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;Some details<HB>
+        ## Returns<HB>
+        Some details<HB>
         `````python
-            x_y = thing_do();
-            ``` # this should't close the fence!
-            a_b = other_thing();
+        x_y = thing_do();
+        ``` # this should't close the fence!
+        a_b = other_thing();
         `````<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;And so on.
+        And so on.
         ");
     }
 
@@ -868,14 +868,14 @@ mod tests {
         assert_snapshot!(docstring.render_markdown(), @"
         My cool func...<HB>
         <HB>
-        Returns:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;Some details<HB>
+        ## Returns<HB>
+        Some details<HB>
         ~~~~~~python
-            x_y = thing_do();
-            ~~~ # this should't close the fence!
-            a_b = other_thing();
+        x_y = thing_do();
+        ~~~ # this should't close the fence!
+        a_b = other_thing();
         ~~~~~~<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;And so on.
+        And so on.
         ");
     }
 
@@ -1247,20 +1247,34 @@ mod tests {
                 This is a second paragraph of param2 description.
             param3: A parameter without type annotation
 
+        Keyword Args:
+            keyword_only (bool): Keyword-only parameter description
+
         Returns:
             str: The return value description
+
+        Yields:
+            int: The next value
         "#;
 
         let docstring = Docstring::new(docstring.to_owned());
         let param_docs = docstring.parameter_documentation();
 
-        assert_eq!(param_docs.len(), 3);
+        assert_eq!(param_docs.len(), 4);
         assert_eq!(&param_docs["param1"], "The first parameter description");
         assert_eq!(
             &param_docs["param2"],
-            "The second parameter description\nThis is a continuation of param2 description.\n\nThis is a second paragraph of param2 description."
+            concat!(
+                "The second parameter description\n",
+                "This is a continuation of param2 description.\n\n",
+                "This is a second paragraph of param2 description."
+            )
         );
         assert_eq!(&param_docs["param3"], "A parameter without type annotation");
+        assert_eq!(
+            &param_docs["keyword_only"],
+            "Keyword-only parameter description"
+        );
 
         assert_snapshot!(docstring.render_plaintext(), @"
         This is a function description.
@@ -1274,8 +1288,14 @@ mod tests {
                 This is a second paragraph of param2 description.
             param3: A parameter without type annotation
 
+        Keyword Args:
+            keyword_only (bool): Keyword-only parameter description
+
         Returns:
             str: The return value description
+
+        Yields:
+            int: The next value
         ");
 
         assert_snapshot!(docstring.render_markdown(), @"
@@ -1290,9 +1310,247 @@ mod tests {
         &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;This is a second paragraph of param2 description.<HB>
         &nbsp;&nbsp;&nbsp;&nbsp;param3: A parameter without type annotation<HB>
         <HB>
-        Returns:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;str: The return value description
+        ## Keyword Arguments<HB>
+        ```python
+        keyword_only: bool
+        ```<HB>
+        Keyword-only parameter description<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```<HB>
+        The return value description<HB>
+        <HB>
+        ## Yields<HB>
+        ```python
+        int
+        ```<HB>
+        The next value
         ");
+    }
+
+    #[test]
+    fn google_markdown_does_not_special_case_first_line_section() {
+        let _snap = bind_docstring_snapshot_filters();
+        let docstring = Docstring::new(
+            "\
+Args:
+    value: Description.
+    other: More."
+                .to_owned(),
+        );
+
+        assert!(docstring.parameter_documentation().is_empty());
+        assert_snapshot!(docstring.render_markdown(), @"
+        Args:<HB>
+        value: Description.<HB>
+        other: More.
+        ");
+    }
+
+    #[test]
+    fn google_sections_render_edge_cases() {
+        let _snap = bind_docstring_snapshot_filters();
+        let docstring = Docstring::new(
+            "\
+Attributes:
+    name (str): Display name.
+    coords (tuple(int, int)): Coordinate pair.
+    callback (Callable(int, str)): Converts raw values.
+        if name:
+            return name
+
+Raises:
+    ValueError: If invalid."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        ## Attributes<HB>
+        ```python
+        name: str
+        ```<HB>
+        Display name.<HB>
+        <HB>
+        ```python
+        coords: tuple(int, int)
+        ```<HB>
+        Coordinate pair.<HB>
+        <HB>
+        ```python
+        callback: Callable(int, str)
+        ```<HB>
+        Converts raw values.<HB>
+        if name:<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;return name<HB>
+        <HB>
+        ## Raises<HB>
+        ```python
+        ValueError
+        ```<HB>
+        If invalid.
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Summary.
+
+Args:
+    value: Description.
+        ```python
+        Args:
+            nested: Still code.
+        Returns:
+            Still code.
+        ```
+    url (Literal[\"http://\"]): URL."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @r#"
+        Summary.<HB>
+        <HB>
+        ## Parameters<HB>
+        ```python
+        value
+        ```<HB>
+        Description.<HB>
+        ```python
+        Args:
+            nested: Still code.
+        Returns:
+            Still code.
+        ```<HB>
+        <HB>
+        ```python
+        url: Literal["http://"]
+        ```<HB>
+        URL.
+        "#);
+
+        let docstring = Docstring::new(
+            "\
+Summary.
+
+Returns:
+    Literal[\"http://\"]: First paragraph.
+
+    Second paragraph."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @r#"
+        Summary.<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        Literal["http://"]
+        ```<HB>
+        First paragraph.<HB>
+        <HB>
+        Second paragraph.
+        "#);
+
+        let docstring = Docstring::new(
+            "\
+Summary.
+
+Returns:
+    str | None: Optional value.
+
+Yields:
+    :obj:`list` of :obj:`str`: Result chunks."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        Summary.<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str | None
+        ```<HB>
+        Optional value.<HB>
+        <HB>
+        ## Yields<HB>
+        ```python
+        :obj:`list` of :obj:`str`
+        ```<HB>
+        Result chunks.
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Summary.
+
+Args:
+    value: Description.
+>>> value
+42"
+            .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        Summary.<HB>
+        <HB>
+        ## Parameters<HB>
+        ```python
+        value
+        ```<HB>
+        Description.<HB>
+        ```````````python
+        >>> value
+        42
+        ```````````
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Summary.
+
+Returns:
+    https://example.com: more details."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        Summary.<HB>
+        <HB>
+        ## Returns<HB>
+        https://example.com: more details.
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Summary.
+
+Returns:
+    str:Description without whitespace."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        Summary.<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```<HB>
+        Description without whitespace.
+        ");
+
+        let docstring = Docstring::new(
+            "\
+Args:
+    : Missing name."
+                .to_owned(),
+        );
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        Args:<HB>
+        : Missing name.
+    ");
     }
 
     #[test]
@@ -1318,6 +1576,16 @@ mod tests {
         );
         assert_eq!(&param_docs["*args"], "Extra positional arguments.");
         assert_eq!(&param_docs["**kwargs"], "Extra keyword arguments.");
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        This is a function description.<HB>
+        <HB>
+        Args:<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): The first parameter description.<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;For example: pass an absolute path.<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;*args: Extra positional arguments.<HB>
+        &nbsp;&nbsp;&nbsp;&nbsp;**kwargs: Extra keyword arguments.
+        ");
     }
 
     #[test]
@@ -1520,9 +1788,16 @@ mod tests {
         assert_snapshot!(docstring.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Args:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): Google-style parameter<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param2 (int): Another Google-style parameter<HB>
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        Google-style parameter<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        Another Google-style parameter<HB>
         <HB>
         Parameters<HB>
         ----------<HB>
@@ -1725,9 +2000,16 @@ mod tests {
         assert_snapshot!(docstring.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Args:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): Google-style parameter<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param2 (int): Google-style duplicate parameter<HB>
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        Google-style parameter<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        Google-style duplicate parameter<HB>
         <HB>
         ## Parameters<HB>
         ```python
@@ -1940,9 +2222,16 @@ mod tests {
         assert_snapshot!(docstring_windows.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Args:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): The first parameter<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param2 (int): The second parameter
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        The second parameter
         ");
 
         assert_snapshot!(docstring_mac.render_plaintext(), @"
@@ -1956,9 +2245,16 @@ mod tests {
         assert_snapshot!(docstring_mac.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Args:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): The first parameter<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param2 (int): The second parameter
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        The second parameter
         ");
 
         assert_snapshot!(docstring_unix.render_plaintext(), @"
@@ -1972,9 +2268,16 @@ mod tests {
         assert_snapshot!(docstring_unix.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        Args:<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): The first parameter<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;param2 (int): The second parameter
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        The second parameter
         ");
     }
 

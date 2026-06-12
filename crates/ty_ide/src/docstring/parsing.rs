@@ -92,3 +92,19 @@ pub(in crate::docstring) fn parse_parenthesized_type(name: &str) -> (&str, Optio
 
     (name, None)
 }
+
+pub(in crate::docstring) fn is_docstring_type_expression(ty: &str) -> bool {
+    if ty.is_empty() || !ty.chars().all(is_docstring_type_expression_char) {
+        return false;
+    }
+
+    if !ty.chars().any(char::is_whitespace) {
+        return true;
+    }
+
+    ty.contains('[') || ty.contains(',') || ty.contains('|') || ty.contains('`')
+}
+
+fn is_docstring_type_expression_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || "_.[](){},|\"':/ `~-".contains(ch)
+}
