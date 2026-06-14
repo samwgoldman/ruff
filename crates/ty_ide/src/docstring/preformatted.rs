@@ -90,54 +90,76 @@ impl RestLiteralBlockScanner {
 
     /// Consumes a line if it is inside a reST literal block already observed by `observe_marker`.
     pub(super) fn consume_line(&mut self, line: &str) -> bool {
+        let outcome = self.line_outcome(line);
+        if let Some(next_state) = outcome.next_state {
+            self.state = next_state;
+        }
+
+        outcome.is_literal_block
+    }
+
+    /// Returns whether `consume_line` would consume the given line.
+    pub(super) fn would_consume_line(&self, line: &str) -> bool {
+        self.line_outcome(line).is_literal_block
+    }
+
+    fn line_outcome(&self, line: &str) -> RestLiteralBlockLineOutcome {
         let current_indent = indentation(line);
         let line_is_empty = line.trim_start().is_empty();
 
-        match self.state {
+        match &self.state {
             RestLiteralBlockState::Active(RestLiteralBlockKind::Indented { marker_indent }) => {
-                if !line_is_empty && current_indent <= marker_indent {
+                if !line_is_empty && current_indent <= *marker_indent {
                     // We've reached the de-dent that marks the end of the literal block.
-                    self.state = RestLiteralBlockState::Inactive;
-                    false
+                    RestLiteralBlockLineOutcome::not_literal_block_with_state(
+                        RestLiteralBlockState::Inactive,
+                    )
                 } else {
-                    true
+                    RestLiteralBlockLineOutcome::literal_block()
                 }
             }
             RestLiteralBlockState::Active(RestLiteralBlockKind::Quoted { indent, quote }) => {
                 if line_is_empty {
-                    self.state = RestLiteralBlockState::Inactive;
-                    false
-                } else if Self::quote_character(line, indent) == Some(quote) {
-                    true
+                    RestLiteralBlockLineOutcome::not_literal_block_with_state(
+                        RestLiteralBlockState::Inactive,
+                    )
+                } else if Self::quote_character(line, *indent) == Some(*quote) {
+                    RestLiteralBlockLineOutcome::literal_block()
                 } else {
-                    self.state = RestLiteralBlockState::Inactive;
-                    false
+                    RestLiteralBlockLineOutcome::not_literal_block_with_state(
+                        RestLiteralBlockState::Inactive,
+                    )
                 }
             }
             RestLiteralBlockState::Pending {
                 marker_indent,
                 allows_quoted_literal_block,
             } if !line_is_empty => {
-                if current_indent > marker_indent {
+                if current_indent > *marker_indent {
                     // We just entered a new literal block.
-                    self.state = RestLiteralBlockState::Active(RestLiteralBlockKind::Indented {
-                        marker_indent,
-                    });
-                    true
-                } else if allows_quoted_literal_block
-                    && let Some(quote) = Self::quote_character(line, marker_indent)
+                    RestLiteralBlockLineOutcome::literal_block_with_state(
+                        RestLiteralBlockState::Active(RestLiteralBlockKind::Indented {
+                            marker_indent: *marker_indent,
+                        }),
+                    )
+                } else if *allows_quoted_literal_block
+                    && let Some(quote) = Self::quote_character(line, *marker_indent)
                 {
-                    self.state = RestLiteralBlockState::Active(RestLiteralBlockKind::Quoted {
-                        indent: marker_indent,
-                        quote,
-                    });
-                    true
+                    RestLiteralBlockLineOutcome::literal_block_with_state(
+                        RestLiteralBlockState::Active(RestLiteralBlockKind::Quoted {
+                            indent: *marker_indent,
+                            quote,
+                        }),
+                    )
                 } else {
-                    self.state = RestLiteralBlockState::Inactive;
-                    false
+                    RestLiteralBlockLineOutcome::not_literal_block_with_state(
+                        RestLiteralBlockState::Inactive,
+                    )
                 }
             }
-            RestLiteralBlockState::Pending { .. } | RestLiteralBlockState::Inactive => false,
+            RestLiteralBlockState::Pending { .. } | RestLiteralBlockState::Inactive => {
+                RestLiteralBlockLineOutcome::not_literal_block()
+            }
         }
     }
 
@@ -208,6 +230,43 @@ impl RestLiteralBlockScanner {
         QUOTED_LITERAL_BLOCK_QUOTE_CHARACTERS
             .contains(quote)
             .then_some(quote)
+    }
+}
+
+/// Describes whether a line is part of a reST literal block, and the state
+/// transition that will result from consuming the line.
+struct RestLiteralBlockLineOutcome {
+    is_literal_block: bool,
+    next_state: Option<RestLiteralBlockState>,
+}
+
+impl RestLiteralBlockLineOutcome {
+    const fn literal_block() -> Self {
+        Self {
+            is_literal_block: true,
+            next_state: None,
+        }
+    }
+
+    const fn literal_block_with_state(next_state: RestLiteralBlockState) -> Self {
+        Self {
+            is_literal_block: true,
+            next_state: Some(next_state),
+        }
+    }
+
+    const fn not_literal_block() -> Self {
+        Self {
+            is_literal_block: false,
+            next_state: None,
+        }
+    }
+
+    const fn not_literal_block_with_state(next_state: RestLiteralBlockState) -> Self {
+        Self {
+            is_literal_block: false,
+            next_state: Some(next_state),
+        }
     }
 }
 

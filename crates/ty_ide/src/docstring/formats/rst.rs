@@ -6,7 +6,7 @@ use ruff_python_trivia::leading_indentation;
 use ruff_source_file::{Line as SourceLine, UniversalNewlineIterator, UniversalNewlines};
 use ruff_text_size::{TextRange, TextSize};
 
-use super::super::preformatted::PreformattedBlockScanner;
+use super::super::preformatted::{PreformattedBlockScanner, RestLiteralBlockScanner};
 
 /// Represents a parsed restructured text (reST) docstring.
 pub(super) struct Docstring {
@@ -71,6 +71,18 @@ impl<'a> Lines<'a> {
     fn next(&mut self) -> Option<DocstringLine<'a>> {
         let (index, line) = self.inner.next()?;
         Some(DocstringLine::new(index, &line))
+    }
+
+    /// Returns the next non-blank line without advancing the cursor.
+    fn peek_non_blank(&self) -> Option<DocstringLine<'a>> {
+        let mut next = self.clone();
+        while let Some(line) = next.peek()
+            && line.text.trim().is_empty()
+        {
+            next.next();
+        }
+
+        next.peek()
     }
 }
 
@@ -144,14 +156,22 @@ impl FieldList {
         let mut range_end = line.range.end();
 
         while let Some(line) = lines.peek() {
+            if current.consume_rest_literal_block_line(line.text) {
+                current.push_line(line.text);
+                lines.next();
+                end_line = line.index + 1;
+                range_end = line.range.end();
+                continue;
+            }
+
             if line.text.trim().is_empty() {
                 // Blank lines continue the field list only before another field or a continuation.
 
-                if !Self::blank_line_continues_field_list(lines, field_list_indent) {
+                if !current.blank_line_continues_field(lines, field_list_indent) {
                     break;
                 }
 
-                current.lines.push(line.text);
+                current.push_line(line.text);
                 lines.next();
                 end_line = line.index + 1;
                 range_end = line.range.end();
@@ -176,7 +196,7 @@ impl FieldList {
 
             // More-indented non-blank lines continue the current field body
             // (and hence also the current field list).
-            current.lines.push(line.text);
+            current.push_line(line.text);
             lines.next();
             end_line = line.index + 1;
             range_end = line.range.end();
@@ -194,46 +214,8 @@ impl FieldList {
         })
     }
 
-    /// Returns whether a blank line keeps the current field list open.
-    ///
-    /// A blank line before an indented continuation stays in the current field list:
-    ///
-    /// ```rst
-    /// :param x: First paragraph.
-    ///
-    ///     Second paragraph.
-    /// :param y: Next parameter.
-    /// ```
-    ///
-    /// A blank line before another same-indent field also stays in the current field list:
-    ///
-    /// ```rst
-    /// :param x: First parameter.
-    ///
-    /// :param y: Second parameter.
-    /// ```
-    ///
-    /// A blank line before same-indent prose ends the field list:
-    ///
-    /// ```rst
-    /// :param x: First parameter.
-    ///
-    /// This is normal prose.
-    /// ```
-    fn blank_line_continues_field_list(lines: &Lines<'_>, indent: TextSize) -> bool {
-        let mut next = lines.clone();
-        while let Some(line) = next.peek()
-            && line.text.trim().is_empty()
-        {
-            next.next();
-        }
-
-        let Some(non_blank_line) = next.peek() else {
-            return false;
-        };
-
-        FieldHeader::indentation(non_blank_line.text) > indent
-            || FieldHeader::at_indent(non_blank_line.text, indent).is_some()
+    fn line_continues_field_list(line: &str, indent: TextSize) -> bool {
+        FieldHeader::indentation(line) > indent || FieldHeader::at_indent(line, indent).is_some()
     }
 }
 
@@ -244,17 +226,23 @@ struct FieldBuilder<'a> {
     kind: FieldKind<'a>,
     body: &'a str,
     lines: Vec<&'a str>,
+    rest_literal_blocks: RestLiteralBlockScanner,
 }
 
 impl<'a> FieldBuilder<'a> {
     /// Initializes a builder object for a new field instance.
     fn new(header: FieldHeader<'a>) -> Self {
-        Self {
+        let mut builder = Self {
             indent: header.indent,
             kind: header.kind,
             body: header.body,
             lines: vec![header.raw],
-        }
+            rest_literal_blocks: RestLiteralBlockScanner::default(),
+        };
+        builder
+            .rest_literal_blocks
+            .observe_marker(header.body, header.indent);
+        builder
     }
 
     /// Emits the field that was constructed with this builder.
@@ -347,6 +335,29 @@ impl<'a> FieldBuilder<'a> {
 
         // Trim empty lines from either end of the result.
         lines[start..end].join("\n")
+    }
+
+    fn consume_rest_literal_block_line(&mut self, line: &'a str) -> bool {
+        self.rest_literal_blocks.consume_line(line)
+    }
+
+    /// Returns whether a blank line keeps the current field open.
+    ///
+    /// Blank lines may precede another field, an indented continuation, or a quoted literal block
+    /// whose quote marker can look like a field header.
+    fn blank_line_continues_field(&self, lines: &Lines<'a>, field_list_indent: TextSize) -> bool {
+        let Some(non_blank_line) = lines.peek_non_blank() else {
+            return false;
+        };
+
+        self.rest_literal_blocks
+            .would_consume_line(non_blank_line.text)
+            || FieldList::line_continues_field_list(non_blank_line.text, field_list_indent)
+    }
+
+    fn push_line(&mut self, line: &'a str) {
+        self.lines.push(line);
+        self.rest_literal_blocks.observe_marker_in_line(line);
     }
 }
 
@@ -879,6 +890,27 @@ Intervening prose.
         first: First line.
           :param fake: This is continuation text, not a new field.
         second: Real second parameter.
+        ");
+    }
+
+    #[test]
+    fn parameter_documentation_preserves_field_body_literal_blocks() {
+        let param_docs = parameter_documentation(
+            "\
+:param quoted: Example::
+
+:param sample: This is sample input.
+:returns: This is still sample input.
+
+:param real: Real parameter.",
+        );
+
+        assert_snapshot!(param_docs, @r"
+        quoted: Example::
+
+          :param sample: This is sample input.
+          :returns: This is still sample input.
+        real: Real parameter.
         ");
     }
 
