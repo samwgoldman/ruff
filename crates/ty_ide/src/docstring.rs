@@ -1567,6 +1567,68 @@ mod tests {
         ");
     }
 
+    /// The first physical line of a docstring loses its indentation under PEP
+    /// 257 trimming. With no non-first field line to establish a baseline
+    /// indent, both of these single-line-opening forms can normalize to the
+    /// same text:
+    ///
+    /// ```python
+    /// def f():
+    ///     """:param value: First line.
+    ///     Second line.
+    ///     """
+    /// ```
+    ///
+    /// ```python
+    /// def f():
+    ///     """:param value: First line.
+    ///         Second line.
+    ///     """
+    /// ```
+    ///
+    /// The parser therefore cannot tell whether the second field-content line's
+    /// leading spaces are only the ordinary source indentation for the
+    /// docstring body or extra continuation indentation relative to the
+    /// `:param` field. For simplicity, we don't make any guesses as to the
+    /// user's intent in this scenario.
+    ///
+    /// Users can make the continuation unambiguous by putting the `:param`
+    /// field immediately after the opening newline, so the field starts on a
+    /// non-first docstring line:
+    ///
+    /// ```python
+    /// def f():
+    ///     """
+    ///     :param value: First line.
+    ///         Second line.
+    ///     """
+    /// ```
+    ///
+    /// Or by putting the field after a summary paragraph and blank line:
+    ///
+    /// ```python
+    /// def f():
+    ///     """Summary.
+    ///
+    ///     :param value: First line.
+    ///         Second line.
+    ///     """
+    /// ```
+    #[test]
+    fn rest_markdown_does_not_special_case_first_line_field_continuation() {
+        let _snap = bind_docstring_snapshot_filters();
+        let docstring = Docstring::new(":param value: First line.\n    Second line.".to_owned());
+
+        assert_snapshot!(docstring.render_markdown(), @"
+        ## Parameters<HB>
+        ```python
+        value
+        ```<HB>
+        First line.<HB>
+        Second line.
+        ");
+    }
+
     #[test]
     fn test_rest_style_parameter_documentation() {
         let _snap = bind_docstring_snapshot_filters();
@@ -1612,12 +1674,27 @@ mod tests {
         assert_snapshot!(docstring.render_markdown(), @"
         This is a function description.<HB>
         <HB>
-        :param str param1: The first parameter description<HB>
-        :param int param2: The second parameter description<HB>
-        &nbsp;&nbsp;&nbsp;&nbsp;This is a continuation of param2 description.<HB>
-        :param param3: A parameter without type annotation<HB>
-        :returns: The return value description<HB>
-        :rtype: str
+        ## Parameters<HB>
+        ```python
+        param1: str
+        ```<HB>
+        The first parameter description<HB>
+        <HB>
+        ```python
+        param2: int
+        ```<HB>
+        The second parameter description This is a continuation of param2 description.<HB>
+        <HB>
+        ```python
+        param3
+        ```<HB>
+        A parameter without type annotation<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```<HB>
+        The return value description
         ");
     }
 
@@ -1688,8 +1765,16 @@ mod tests {
         &nbsp;&nbsp;&nbsp;&nbsp;param1 (str): Google-style parameter<HB>
         &nbsp;&nbsp;&nbsp;&nbsp;param2 (int): Google-style duplicate parameter<HB>
         <HB>
-        :param int param2: reST-style parameter<HB>
-        :param param3: Another reST-style parameter<HB>
+        ## Parameters<HB>
+        ```python
+        param2: int
+        ```<HB>
+        reST-style parameter<HB>
+        <HB>
+        ```python
+        param3
+        ```<HB>
+        Another reST-style parameter<HB>
         <HB>
         Parameters<HB>
         ----------<HB>

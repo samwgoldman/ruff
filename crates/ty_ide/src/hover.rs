@@ -565,6 +565,60 @@ mod tests {
     }
 
     #[test]
+    fn hover_function_rest_docstring() {
+        let test = hover_test(
+            r#"
+        def documented(value):
+            '''Return a value.
+
+            :param str value: The input value.
+            :rtype: str
+            '''
+            return value
+
+        docu<CURSOR>mented("x")
+        "#,
+        );
+
+        assert_snapshot!(test.hover(), @r#"
+        def documented(value) -> Unknown
+        ---------------------------------------------
+        Return a value.
+
+        :param str value: The input value.
+        :rtype: str
+
+        ---------------------------------------------
+        ```python
+        def documented(value) -> Unknown
+        ```
+        ---
+        Return a value.<HB>
+        <HB>
+        ## Parameters<HB>
+        ```python
+        value: str
+        ```<HB>
+        The input value.<HB>
+        <HB>
+        ## Returns<HB>
+        ```python
+        str
+        ```
+        ---------------------------------------------
+        info[hover]: Hovered content is
+          --> main.py:10:1
+           |
+        10 | documented("x")
+           | ^^^^-^^^^^
+           | |   |
+           | |   Cursor offset
+           | source
+           |
+        "#);
+    }
+
+    #[test]
     fn hover_class() {
         let test = hover_test(
             r#"
