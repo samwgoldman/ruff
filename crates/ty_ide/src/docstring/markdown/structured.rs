@@ -2,12 +2,15 @@ use std::borrow::Cow;
 
 use ruff_text_size::{TextRange, TextSize};
 
+mod rst;
+
+use super::super::formats::Formats;
 use super::super::sections::{Section, render_boundary_after_description};
 
 /// Accepts a PEP 257-trimmed docstring body and renders Markdown for sections
 /// recognized in supported formats.
-pub(super) fn render(body: &str) -> Cow<'_, str> {
-    Docstring::parse(body).render_markdown()
+pub(super) fn render<'a>(body: &'a str, formats: &Formats) -> Cow<'a, str> {
+    Docstring::parse(body, formats).render_markdown()
 }
 
 /// A display-oriented parse of a PEP 257-trimmed docstring body.
@@ -19,11 +22,11 @@ struct Docstring<'a> {
 }
 
 impl<'a> Docstring<'a> {
-    /// Factory  method that parses `source` into blocks for Markdown rendering.
-    fn parse(source: &'a str) -> Self {
+    /// Factory method that parses `source` into blocks for Markdown rendering.
+    fn parse(source: &'a str, formats: &Formats) -> Self {
         Self {
             source,
-            segments: parse_blocks(source, Vec::new()),
+            segments: parse_blocks(source, formats),
         }
     }
 
@@ -73,11 +76,20 @@ impl Segment<'_> {
     }
 }
 
+/// Produces structured docstring sections from a parsed docstring format.
+trait SectionSource {
+    fn structured_sections(&self) -> Vec<Section>;
+}
+
 /// Builds the render block list from parsed sections.
 ///
 /// Returns an empty list when there are no structural replacements to apply,
 /// or when an invalid range should trigger a fall back to the original docstring.
-fn parse_blocks(raw: &str, mut sections: Vec<Section>) -> Vec<Segment<'_>> {
+fn parse_blocks<'a>(raw: &'a str, formats: &Formats) -> Vec<Segment<'a>> {
+    parse_section_blocks(raw, formats.rst().structured_sections())
+}
+
+fn parse_section_blocks(raw: &str, mut sections: Vec<Section>) -> Vec<Segment<'_>> {
     sections.sort_by_key(Section::start);
     let raw_len = TextSize::of(raw);
     let mut blocks = Vec::new();
@@ -132,20 +144,22 @@ mod tests {
     use insta::assert_snapshot;
     use ruff_text_size::{TextRange, TextSize};
 
-    use super::{Docstring, parse_blocks};
+    use super::{Docstring, parse_section_blocks};
+    use crate::docstring::formats::Formats;
     use crate::docstring::sections::{Section, SectionItem, SectionKind};
 
     #[test]
     fn docstrings_without_structured_sections_are_returned_unchanged() {
         let docstring = "Summary.\n\nDetails.";
-        let parsed = Docstring::parse(docstring);
+        let formats = Formats::parse(docstring);
+        let parsed = Docstring::parse(docstring, &formats);
 
         assert_eq!(parsed.render_markdown(), docstring);
     }
 
     #[test]
     fn following_prose_does_not_continue_a_rendered_parameter_list() {
-        let rendered = render_parameter_docstring("- First option.", "After.");
+        let rendered = render_docstring(":param value:\n    - First option.\nAfter.");
 
         assert_snapshot!(rendered, @"
         ## Parameters
@@ -159,7 +173,7 @@ mod tests {
 
     #[test]
     fn following_prose_is_rendered_outside_a_parameter_doctest() {
-        let rendered = render_parameter_docstring(">>> value\n1", "After.");
+        let rendered = render_docstring(":param value:\n    >>> value\n    1\nAfter.");
 
         assert_snapshot!(rendered, @"
         ## Parameters
@@ -174,7 +188,7 @@ mod tests {
 
     #[test]
     fn following_prose_is_rendered_outside_an_unclosed_parameter_code_fence() {
-        let rendered = render_parameter_docstring("```python\nvalue = 1", "After.");
+        let rendered = render_docstring(":param value:\n    ```python\n    value = 1\nAfter.");
 
         assert_snapshot!(rendered, @"
         ## Parameters
@@ -193,7 +207,7 @@ mod tests {
         let raw = "Summary.\n\n:param value:\n    Value.";
         let rendered = Docstring {
             source: raw,
-            segments: parse_blocks(
+            segments: parse_section_blocks(
                 raw,
                 vec![section_block(
                     TextRange::new(TextSize::from(10), TextSize::of(raw) + TextSize::from(1)),
@@ -211,35 +225,11 @@ mod tests {
         assert_eq!(rendered, raw);
     }
 
-    fn render_parameter_docstring(description: &str, following_prose: &str) -> String {
-        let section_source = format!(":param value:\n{}", indent_description(description));
-        let raw = format!("{section_source}\n{following_prose}");
-
-        Docstring {
-            source: &raw,
-            segments: parse_blocks(
-                &raw,
-                vec![section_block(
-                    TextRange::up_to(TextSize::of(section_source.as_str())),
-                    vec![SectionItem::new(
-                        SectionKind::Parameters,
-                        Some("value"),
-                        None,
-                        description,
-                    )],
-                )],
-            ),
-        }
-        .render_markdown()
-        .into_owned()
-    }
-
-    fn indent_description(description: &str) -> String {
-        description
-            .lines()
-            .map(|line| format!("    {line}"))
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn render_docstring(docstring: &str) -> String {
+        let formats = Formats::parse(docstring);
+        Docstring::parse(docstring, &formats)
+            .render_markdown()
+            .into_owned()
     }
 
     fn section_block(range: TextRange, items: Vec<SectionItem>) -> Section {

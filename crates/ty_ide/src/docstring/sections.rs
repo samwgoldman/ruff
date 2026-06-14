@@ -17,10 +17,6 @@ pub(in crate::docstring) struct Section {
 
 impl Section {
     /// Creates a section block from the items parsed out of one source section.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by follow-up structured docstring parsers")
-    )]
     pub(in crate::docstring) fn new(range: TextRange, items: Vec<SectionItem>) -> Option<Self> {
         if items.is_empty() || items.iter().any(SectionItem::is_empty) {
             return None;
@@ -70,10 +66,6 @@ pub(in crate::docstring) struct SectionItem {
 
 impl SectionItem {
     /// Creates a section item from parser-prepared name, type, and description parts.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by follow-up structured docstring parsers")
-    )]
     pub(in crate::docstring) fn new(
         kind: SectionKind,
         display_name: Option<&str>,

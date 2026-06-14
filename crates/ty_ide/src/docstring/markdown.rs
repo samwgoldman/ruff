@@ -1,6 +1,8 @@
 mod postprocess;
 mod structured;
 
+use super::formats::Formats;
+
 /// Represents a fenced code block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MarkdownFence<'a> {
@@ -41,6 +43,7 @@ impl<'a> MarkdownFence<'a> {
 }
 
 pub(super) fn render(raw: &str) -> String {
-    let source = structured::render(raw);
+    let formats = Formats::parse(raw);
+    let source = structured::render(raw, &formats);
     postprocess::render(source.as_ref())
 }
