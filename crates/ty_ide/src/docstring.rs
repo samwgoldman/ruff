@@ -87,6 +87,33 @@ impl Docstring {
     }
 }
 
+/// Text extracted from within a larger docstring.
+///
+/// Unlike a complete docstring, a fragment has already lost its surrounding indentation context.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DocstringFragment(String);
+
+impl DocstringFragment {
+    pub fn new(raw: String) -> Self {
+        Self(raw)
+    }
+
+    pub fn render(&self, kind: MarkupKind) -> String {
+        match kind {
+            MarkupKind::PlainText => self.render_plaintext(),
+            MarkupKind::Markdown => self.render_markdown(),
+        }
+    }
+
+    fn render_plaintext(&self) -> String {
+        documentation_trim(&self.0)
+    }
+
+    fn render_markdown(&self) -> String {
+        markdown::render_fragment(&documentation_trim(&self.0))
+    }
+}
+
 /// Normalizes tabs and trims a docstring as specified in PEP-0257
 ///
 /// See: <https://peps.python.org/pep-0257/#handling-docstring-indentation>
