@@ -623,7 +623,9 @@ struct PatternBindingTypes<'db> {
 #[derive(Clone, Copy)]
 struct PatternBindingType<'db> {
     ty: Type<'db>,
-    aliases_subject: bool,
+    /// The type that reached this node before its nested pattern filtered it.
+    /// Extracted values have no subject provenance.
+    original_subject_ty: Option<Type<'db>>,
 }
 
 /// Controls when pattern analysis restores an original subject type after filtering its arms.
@@ -652,11 +654,11 @@ enum PatternAnalysisPurpose {
 }
 
 impl<'db> PatternBindingTypes<'db> {
-    fn subject(subject_ty: Type<'db>) -> Self {
+    fn subject(binding_ty: Type<'db>, original_subject_ty: Type<'db>) -> Self {
         Self {
             contributions: smallvec![PatternBindingType {
-                ty: subject_ty,
-                aliases_subject: true,
+                ty: binding_ty,
+                original_subject_ty: Some(original_subject_ty),
             }],
         }
     }
@@ -665,7 +667,7 @@ impl<'db> PatternBindingTypes<'db> {
         Self {
             contributions: smallvec![PatternBindingType {
                 ty: extracted_ty,
-                aliases_subject: false,
+                original_subject_ty: None,
             }],
         }
     }
@@ -676,7 +678,7 @@ impl<'db> PatternBindingTypes<'db> {
 
     fn demote_subject(&mut self) {
         for contribution in &mut self.contributions {
-            contribution.aliases_subject = false;
+            contribution.original_subject_ty = None;
         }
     }
 
@@ -689,21 +691,22 @@ impl<'db> PatternBindingTypes<'db> {
             db,
             self.contributions
                 .iter()
-                .filter(|binding| binding.aliases_subject)
+                .filter(|binding| binding.original_subject_ty.is_some())
                 .map(|binding| binding.ty),
         )
     }
 
-    fn restore_subject(&mut self, restored_subject_ty: Type<'db>) {
+    fn restore_subject(&mut self, restored_subject_ty: Type<'db>, original_subject_ty: Type<'db>) {
         let mut restored = false;
         self.contributions.retain_mut(|contribution| {
-            if !contribution.aliases_subject {
+            if contribution.original_subject_ty.is_none() {
                 return true;
             }
             if restored {
                 return false;
             }
             contribution.ty = restored_subject_ty;
+            contribution.original_subject_ty = Some(original_subject_ty);
             restored = true;
             true
         });
@@ -1803,7 +1806,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     Self::merge_binding(
                         &mut result.bindings,
                         place.into(),
-                        PatternBindingTypes::subject(result.stable_subject_ty),
+                        PatternBindingTypes::subject(result.stable_subject_ty, subject_ty),
                     );
                 }
                 result
@@ -1818,7 +1821,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     Self::merge_binding(
                         &mut bindings,
                         place.into(),
-                        PatternBindingTypes::subject(subject_ty),
+                        PatternBindingTypes::subject(subject_ty, subject_ty),
                     );
                 }
                 PatternSuccessResult {
@@ -2611,7 +2614,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         }
         let filtering_matched_subject_ty = filtering_matched_subject_types.build();
         result.matched_subject_ty = self.typevar_preserving_intersection(
-            result.matched_subject_ty,
+            subject_ty,
             filtering_matched_subject_ty,
             &typevars,
         );
@@ -2619,7 +2622,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             let filtering_stable_subject_ty = filtering_stable_subject_types
                 .map_or(filtering_matched_subject_ty, UnionBuilder::build);
             result.stable_subject_ty = self.typevar_preserving_intersection(
-                result.stable_subject_ty,
+                subject_ty,
                 filtering_stable_subject_ty,
                 &typevars,
             );
@@ -2628,11 +2631,9 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     .get(place)
                     .map_or(Type::Never, |binding| binding.ty(self.db));
                 for contribution in &mut binding.contributions {
-                    contribution.ty = self.typevar_preserving_intersection(
-                        contribution.ty,
-                        filtering_ty,
-                        &typevars,
-                    );
+                    let original_ty = contribution.original_subject_ty.unwrap_or(contribution.ty);
+                    contribution.ty =
+                        self.typevar_preserving_intersection(original_ty, filtering_ty, &typevars);
                 }
                 binding
                     .contributions
@@ -2680,11 +2681,14 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 for binding in arm_bindings.values_mut() {
                     let subject_ty = binding.subject_ty(self.db);
                     if !subject_ty.is_never() {
-                        binding.restore_subject(self.preserve_original_subject_type(
+                        binding.restore_subject(
+                            self.preserve_original_subject_type(
+                                original_subject_ty,
+                                subject_ty,
+                                preservation,
+                            ),
                             original_subject_ty,
-                            subject_ty,
-                            preservation,
-                        ));
+                        );
                     }
                 }
                 Self::merge_bindings(&mut bindings, arm_bindings);
