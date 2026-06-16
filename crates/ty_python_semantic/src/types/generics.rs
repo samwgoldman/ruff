@@ -11,7 +11,7 @@ use crate::types::callable::walk_callable_type;
 use crate::types::class::ClassType;
 use crate::types::class_base::ClassBase;
 use crate::types::constraints::{
-    ConstraintBounds, ConstraintSet, ConstraintSetBuilder, IteratorConstraintsExtension,
+    ConstraintBounds, ConstraintSet, ConstraintSetBuilder, IteratorConstraintsExtension, PathBound,
     PathBounds, SolutionProjection, Solutions,
 };
 use crate::types::infer::original_class_type;
@@ -1922,10 +1922,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     pub(crate) fn build_with(
         &mut self,
         generic_context: GenericContext<'db>,
-        mut choose: impl FnMut(
-            BoundTypeVarInstance<'db>,
-            Option<ConstraintBounds<'db>>,
-        ) -> Option<Type<'db>>,
+        mut choose: impl FnMut(BoundTypeVarInstance<'db>, Option<&PathBound<'db>>) -> Option<Type<'db>>,
     ) -> Specialization<'db> {
         let types = self.solve_pending_with(generic_context, &mut choose);
         let specialization =
@@ -1945,10 +1942,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     fn solve_pending_with(
         &mut self,
         generic_context: GenericContext<'db>,
-        choose: &mut impl FnMut(
-            BoundTypeVarInstance<'db>,
-            Option<ConstraintBounds<'db>>,
-        ) -> Option<Type<'db>>,
+        choose: &mut impl FnMut(BoundTypeVarInstance<'db>, Option<&PathBound<'db>>) -> Option<Type<'db>>,
     ) -> FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>> {
         if generic_context
             .variables_inner(self.db)
@@ -1974,12 +1968,13 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             self.db,
             self.constraints,
             SolutionProjection::InferableOnly(self.inferable),
-            |typevar, _variance, bounds| {
-                if let Some(ty) = choose(typevar, Some(bounds)) {
+            |_variance, path_bound| {
+                let typevar = path_bound.bound_typevar;
+                if let Some(ty) = choose(typevar, Some(path_bound)) {
                     return Ok(Some(ty));
                 }
 
-                PathBounds::default_solve(self.db, self.constraints, typevar, bounds)
+                PathBounds::default_solve(self.db, self.constraints, path_bound)
             },
         ) {
             Solutions::Unsatisfiable | Solutions::Unconstrained => {
@@ -2187,10 +2182,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     fn solve_hash_map_with(
         &mut self,
         generic_context: GenericContext<'db>,
-        choose: &mut impl FnMut(
-            BoundTypeVarInstance<'db>,
-            Option<ConstraintBounds<'db>>,
-        ) -> Option<Type<'db>>,
+        choose: &mut impl FnMut(BoundTypeVarInstance<'db>, Option<&PathBound<'db>>) -> Option<Type<'db>>,
     ) -> FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>> {
         generic_context
             .variables_inner(self.db)
@@ -2201,8 +2193,10 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                     .get_mut(identity)
                     .map(|accumulator| accumulator.get_or_build(self.db));
                 let chosen = match mapped_ty {
-                    Some(mapped_ty) => choose(*variable, Some(ConstraintBounds::exact(mapped_ty)))
-                        .unwrap_or(mapped_ty),
+                    Some(mapped_ty) => {
+                        let path_bound = PathBound::exact(*variable, mapped_ty);
+                        choose(*variable, Some(&path_bound)).unwrap_or(mapped_ty)
+                    }
                     None => choose(*variable, None)?,
                 };
                 Some((*identity, chosen))
