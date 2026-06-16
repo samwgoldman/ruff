@@ -17,9 +17,10 @@ use crate::types::{
     LiteralValueTypeKind, Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner,
     SubclassOfType, Truthiness, Type, TypeContext, TypeVarBoundOrConstraints, UnionBuilder,
     callable_pattern_type, class_pattern_positional_sources, constrained_typevars_in_type,
-    definite_match_pattern_type_for_subject, exact_sequence_pattern_type, infer_expression_types,
-    mapping_pattern_type, pattern_fallthrough_type, sequence_pattern_type_builder,
-    singleton_pattern_type, starred_sequence_pattern_type, typed_dict_matches_class_pattern,
+    definite_match_pattern_type_for_subject, exact_sequence_pattern_type,
+    expand_constrained_typevars, infer_expression_types, mapping_pattern_type,
+    pattern_fallthrough_type, sequence_pattern_type_builder, singleton_pattern_type,
+    starred_sequence_pattern_type, typed_dict_matches_class_pattern,
 };
 use ty_python_core::expression::Expression;
 use ty_python_core::frozen::FrozenMap;
@@ -466,8 +467,6 @@ impl<'db> TestedConstrainedTypeVarCollector<'db> {
         }
     }
 }
-
-const MAX_CONSTRAINED_TYPEVAR_EXPANSIONS: usize = 64;
 
 impl<'db> PatternTypeVarEvidence<'db> {
     fn for_subject(db: &'db dyn Db, subject_ty: Type<'db>, tested: bool) -> Self {
@@ -2591,7 +2590,8 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         let mut result =
             self.analyze_pattern_subject_arms_impl(subject_ty, preservation, &analyze_arm);
         let typevars = result.typevar_evidence.correlated_typevars(self.purpose);
-        let Some(expanded_subject_types) = self.expand_constrained_typevars(subject_ty, &typevars)
+        let Some(expanded_subject_types) =
+            expand_constrained_typevars(self.db, subject_ty, &typevars)
         else {
             return result;
         };
@@ -2725,8 +2725,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         filtering_ty: Type<'db>,
         typevars: &[BoundTypeVarInstance<'db>],
     ) -> Type<'db> {
-        let flattened_original_ty = self
-            .expand_constrained_typevars(original_ty, typevars)
+        let flattened_original_ty = expand_constrained_typevars(self.db, original_ty, typevars)
             .map_or_else(
                 || {
                     original_ty
@@ -2808,38 +2807,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         } else {
             ty
         }
-    }
-
-    /// Expand selected constrained type variables consistently across the complete subject type.
-    fn expand_constrained_typevars(
-        &self,
-        subject_ty: Type<'db>,
-        typevars: &[BoundTypeVarInstance<'db>],
-    ) -> Option<SmallVec<[Type<'db>; 2]>> {
-        if typevars.is_empty() {
-            return None;
-        }
-
-        let expansion_count = typevars.iter().try_fold(1usize, |count, typevar| {
-            count.checked_mul(typevar.typevar(self.db).constraints(self.db)?.len())
-        })?;
-        if expansion_count > MAX_CONSTRAINED_TYPEVAR_EXPANSIONS {
-            return None;
-        }
-
-        let mut expanded: SmallVec<[Type<'db>; 2]> = SmallVec::with_capacity(expansion_count);
-        expanded.push(subject_ty);
-        for typevar in typevars.iter().copied() {
-            let constraints = typevar.typevar(self.db).constraints(self.db)?;
-            let mut next: SmallVec<[Type<'db>; 2]> = SmallVec::with_capacity(expansion_count);
-            for subject_ty in expanded {
-                next.extend(constraints.iter().map(|constraint| {
-                    subject_ty.substitute_one_typevar(self.db, typevar, *constraint)
-                }));
-            }
-            expanded = next;
-        }
-        Some(expanded)
     }
 
     fn sequence_pattern_target_len(kind: &SequencePatternPredicateKind<'db>) -> TupleLength {
