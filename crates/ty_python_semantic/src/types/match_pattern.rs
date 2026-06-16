@@ -41,7 +41,7 @@ pub(crate) fn callable_pattern_type(db: &dyn Db) -> Type<'_> {
 /// `TypedDict` is not a nominal subtype of `dict` in the static type system, but every runtime
 /// value is a dictionary. A `TypedDict` therefore matches class patterns such as `dict()`,
 /// `Mapping()`, and `MutableMapping()`.
-fn typed_dict_matches_class_pattern(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
+pub(crate) fn typed_dict_matches_class_pattern(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
     let Some(dict) = KnownClass::Dict.to_class_literal(db).as_class_literal() else {
         return false;
     };
@@ -147,7 +147,7 @@ enum ClassMatchArgs<'db> {
 }
 
 #[derive(Clone)]
-enum ClassPatternPositionalSource {
+pub(crate) enum ClassPatternPositionalSource {
     MatchSelf,
     Attribute(Name),
     Unknown,
@@ -190,7 +190,7 @@ fn class_has_match_self_flag(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
         })
 }
 
-fn class_pattern_positional_sources(
+pub(crate) fn class_pattern_positional_sources(
     db: &dyn Db,
     class: Option<ClassLiteral<'_>>,
     positional_count: usize,

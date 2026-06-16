@@ -2080,6 +2080,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                             pattern: self.predicate_kind(pattern),
                         })
                         .collect(),
+                    rest: pattern.rest.as_ref().map(|name| name.id.clone()),
                 })
             }
             ast::Pattern::MatchSequence(pattern) => {

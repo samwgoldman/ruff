@@ -195,6 +195,7 @@ pub struct ClassPatternKeywordPredicateKind<'db> {
 #[derive(Debug, Clone, Hash, PartialEq, salsa::Update, get_size2::GetSize)]
 pub struct MappingPatternPredicateKind<'db> {
     pub entries: Box<[MappingPatternEntryPredicateKind<'db>]>,
+    pub rest: Option<Name>,
 }
 
 impl MappingPatternPredicateKind<'_> {
