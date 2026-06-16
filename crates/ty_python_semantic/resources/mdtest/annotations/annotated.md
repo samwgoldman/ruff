@@ -70,10 +70,11 @@ def _(x: Annotated[(int,)]):
 
 ### Correctly parameterized
 
-Inheriting from `Annotated[T, ...]` is equivalent to inheriting from `T` itself.
+For supported class base types, inheriting from `Annotated[T, ...]` is equivalent to inheriting from
+`T` itself.
 
 ```py
-from typing_extensions import Annotated
+from typing_extensions import Annotated, Any
 from ty_extensions import reveal_mro
 
 class C(Annotated[int, "foo"]): ...
@@ -90,6 +91,12 @@ class E(Annotated[list["E"], "metadata"]): ...
 
 # error: [revealed-type] "Revealed MRO: (<class 'E'>, <class 'list[E]'>, <class 'MutableSequence[E]'>, <class 'Sequence[E]'>, <class 'Reversible[E]'>, <class 'Collection[E]'>, <class 'Iterable[E]'>, <class 'Container[Any]'>, typing.Protocol, typing.Generic, <class 'object'>)"
 reveal_mro(E)
+
+# TODO: Support `Annotated[Any, ...]` as a class base.
+# error: [unsupported-base]
+class F(Annotated[Any, "metadata"]): ...
+
+reveal_mro(F)  # revealed: (<class 'F'>, Unknown, <class 'object'>)
 ```
 
 ### Not parameterized
