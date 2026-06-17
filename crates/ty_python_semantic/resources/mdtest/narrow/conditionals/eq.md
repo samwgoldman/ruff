@@ -355,6 +355,33 @@ def _(value: Finite | None, other: A | B):
         reveal_type(value)  # revealed: Never
 ```
 
+Skipping expansion also preserves disjointness for enum complements:
+
+```py
+from enum import Enum
+from typing import final
+
+class ComplementFinite(Enum):
+    FIRST = 1
+    SECOND = 2
+
+@final
+class ComplementA: ...
+
+@final
+class ComplementB: ...
+
+def _(value: ComplementFinite, flag: bool):
+    if value is ComplementFinite.FIRST:
+        return
+
+    other = ComplementA() if flag else ComplementB()
+    if value != other:
+        pass
+    else:
+        reveal_type(value)  # revealed: Never
+```
+
 Expanded domains preserve disjointness for alternatives without finite comparison keys:
 
 ```py

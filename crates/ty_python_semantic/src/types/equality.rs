@@ -372,6 +372,10 @@ fn evaluate_comparison_once<'db>(
         }
     }
 
+    if known_comparison_domains_are_disjoint(db, left, right, operator) {
+        return operator.result_from_equality(false);
+    }
+
     match (left, right) {
         (
             Type::Never
@@ -546,6 +550,22 @@ fn evaluate_comparison_once<'db>(
 
         _ => ComparisonResult::Ambiguous,
     }
+}
+
+fn known_comparison_domains_are_disjoint(
+    db: &dyn Db,
+    left: Type,
+    right: Type,
+    operator: ComparisonOperator,
+) -> bool {
+    let Some(left_semantics) = KnownComparisonSemantics::of_type(db, left, operator) else {
+        return false;
+    };
+    let Some(right_semantics) = KnownComparisonSemantics::of_type(db, right, operator) else {
+        return false;
+    };
+    left_semantics != right_semantics
+        || (left_semantics == KnownComparisonSemantics::Object && left.is_disjoint_from(db, right))
 }
 
 fn evaluate_dynamic_target<'db>(
