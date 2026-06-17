@@ -229,6 +229,8 @@ struct ComparisonKey<'db> {
 struct ComparisonEvaluator<'db> {
     db: &'db dyn Db,
     active: FxHashSet<ComparisonKey<'db>>,
+    #[cfg(test)]
+    evaluations: usize,
 }
 
 impl<'db> ComparisonEvaluator<'db> {
@@ -236,6 +238,8 @@ impl<'db> ComparisonEvaluator<'db> {
         Self {
             db,
             active: FxHashSet::default(),
+            #[cfg(test)]
+            evaluations: 0,
         }
     }
 
@@ -267,7 +271,7 @@ impl<'db> ComparisonEvaluator<'db> {
         self.evaluate_impl(left, right, branch, operator, true)
     }
 
-    /// Evaluate after type-variable expansion without immediately re-expanding finite domains.
+    /// Evaluate after type-variable expansion without re-expanding finite domains.
     fn evaluate_without_finite_expansion(
         &mut self,
         left: Type<'db>,
@@ -286,6 +290,11 @@ impl<'db> ComparisonEvaluator<'db> {
         operator: ComparisonOperator,
         expand_finite_domains: bool,
     ) -> ComparisonResult<'db> {
+        #[cfg(test)]
+        {
+            self.evaluations += 1;
+        }
+
         let left = left.resolve_type_alias(self.db);
         let right = right.resolve_type_alias(self.db);
         let key = ComparisonKey {
@@ -321,7 +330,9 @@ fn evaluate_comparison_once<'db>(
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
 
-    if expand_finite_domains && finite_domain_expansion_is_bounded(db, left, right, operator) {
+    let expand_finite_domains =
+        expand_finite_domains && finite_domain_expansion_is_bounded(db, left, right, operator);
+    if expand_finite_domains {
         let left_alternatives = finite_alternatives(db, left, operator);
         if left == right
             && let Some(alternatives) = left_alternatives.as_deref()
@@ -347,10 +358,10 @@ fn evaluate_comparison_once<'db>(
         }
 
         if let Some(alternatives) = left_alternatives {
-            return evaluate_union_left(evaluator, &alternatives, right, branch, operator);
+            return evaluate_union_left(evaluator, &alternatives, right, branch, operator, true);
         }
         if let Some(alternatives) = right_alternatives {
-            return evaluate_union_right(evaluator, left, &alternatives, branch, operator);
+            return evaluate_union_right(evaluator, left, &alternatives, branch, operator, true);
         }
     }
 
@@ -431,12 +442,22 @@ fn evaluate_comparison_once<'db>(
             .evaluate(other, newtype.concrete_base_type(db), branch, operator)
             .discard_narrowing(),
 
-        (Type::Union(union), other) => {
-            evaluate_union_left(evaluator, union.elements(db), other, branch, operator)
-        }
-        (other, Type::Union(union)) => {
-            evaluate_union_right(evaluator, other, union.elements(db), branch, operator)
-        }
+        (Type::Union(union), other) => evaluate_union_left(
+            evaluator,
+            union.elements(db),
+            other,
+            branch,
+            operator,
+            expand_finite_domains,
+        ),
+        (other, Type::Union(union)) => evaluate_union_right(
+            evaluator,
+            other,
+            union.elements(db),
+            branch,
+            operator,
+            expand_finite_domains,
+        ),
         (Type::Intersection(intersection), other) => evaluate_intersection_left(
             evaluator,
             Type::Intersection(intersection),
@@ -444,6 +465,7 @@ fn evaluate_comparison_once<'db>(
             other,
             branch,
             operator,
+            expand_finite_domains,
         ),
 
         (Type::LiteralValue(left_literal), Type::LiteralValue(right_literal)) => {
@@ -698,10 +720,11 @@ fn evaluate_union_left<'db>(
     other: Type<'db>,
     branch: ComparisonBranch,
     operator: ComparisonOperator,
+    expand_finite_domains: bool,
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
     evaluate_target_union(db, elements, branch, |element| {
-        evaluator.evaluate(element, other, branch, operator)
+        evaluator.evaluate_impl(element, other, branch, operator, expand_finite_domains)
     })
 }
 
@@ -798,15 +821,16 @@ fn evaluate_union_right<'db>(
     elements: &[Type<'db>],
     branch: ComparisonBranch,
     operator: ComparisonOperator,
+    expand_finite_domains: bool,
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
     evaluate_against_results(
         db,
         left,
         branch,
-        elements
-            .iter()
-            .map(|element| evaluator.evaluate(left, *element, branch, operator)),
+        elements.iter().map(|element| {
+            evaluator.evaluate_impl(left, *element, branch, operator, expand_finite_domains)
+        }),
     )
 }
 
@@ -872,6 +896,7 @@ fn evaluate_intersection_left<'db>(
     other: Type<'db>,
     branch: ComparisonBranch,
     operator: ComparisonOperator,
+    expand_finite_domains: bool,
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
     let mut any_true = false;
@@ -881,7 +906,7 @@ fn evaluate_intersection_left<'db>(
     let mut builder = IntersectionBuilder::new(db).add_positive(original);
 
     for element in positive {
-        match evaluator.evaluate(*element, other, branch, operator) {
+        match evaluator.evaluate_impl(*element, other, branch, operator, expand_finite_domains) {
             ComparisonResult::AlwaysTrue => any_true = true,
             ComparisonResult::AlwaysFalse => any_false = true,
             ComparisonResult::CanNarrow(narrowed) => {
@@ -1675,4 +1700,58 @@ fn same_enum_member<'db>(
         return left == right;
     };
     metadata.resolve_member(left.name(db)) == metadata.resolve_member(right.name(db))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+
+    use ruff_db::files::system_path_to_file;
+    use ruff_db::system::DbWithWritableSystem as _;
+
+    use crate::db::tests::setup_db;
+    use crate::place::global_symbol;
+
+    use super::*;
+
+    #[test]
+    fn unbounded_finite_domain_expansion_is_linear() -> anyhow::Result<()> {
+        const DOMAIN_SIZE: usize = 80;
+
+        let mut source = String::from("from enum import Enum\n\nclass LargeEnum(Enum):\n");
+        for index in 0..DOMAIN_SIZE {
+            writeln!(&mut source, "    MEMBER_{index} = {index}")?;
+        }
+        for index in 0..DOMAIN_SIZE {
+            writeln!(&mut source, "\nclass A{index}: ...")?;
+        }
+        write!(&mut source, "\nleft: LargeEnum | None\nright: ")?;
+        for index in 0..DOMAIN_SIZE {
+            if index > 0 {
+                source.push_str(" | ");
+            }
+            write!(&mut source, "A{index}")?;
+        }
+
+        let mut db = setup_db();
+        db.write_file("/src/a.py", source)?;
+        let module = system_path_to_file(&db, "/src/a.py").expect("file should exist");
+        let left = global_symbol(&db, module, "left").place.expect_type();
+        let right = global_symbol(&db, module, "right").place.expect_type();
+
+        let mut evaluator = ComparisonEvaluator::new(&db);
+        evaluator.evaluate(
+            left,
+            right,
+            ComparisonBranch::Positive,
+            ComparisonOperator::Equality,
+        );
+        assert!(
+            evaluator.evaluations < DOMAIN_SIZE * 3,
+            "comparison evaluation should remain linear, but performed {} evaluations",
+            evaluator.evaluations
+        );
+
+        Ok(())
+    }
 }
