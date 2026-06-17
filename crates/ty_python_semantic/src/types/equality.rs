@@ -964,6 +964,7 @@ fn evaluate_finite_domains<'db>(
     }
 
     let right_semantics = finite_domain_comparison_semantics(db, right, operator);
+    let right_identity_domains = finite_domain_identity_domains(db, right, operator);
     if let Some(left_semantics) = finite_domain_comparison_semantics(db, left, operator)
         && let Some(right_semantics) = right_semantics.as_ref()
         && left_semantics.is_disjoint(right_semantics)
@@ -986,6 +987,8 @@ fn evaluate_finite_domains<'db>(
         }
     }
     let keyless_other_semantics = finite_domain_comparison_semantics(db, &keyless_others, operator);
+    let keyless_other_identity_domains =
+        finite_domain_identity_domains(db, &keyless_others, operator);
 
     evaluate_target_union(db, left, branch, |alternative| {
         if let Some(key) = finite_comparison_key(db, alternative, operator) {
@@ -1003,10 +1006,11 @@ fn evaluate_finite_domains<'db>(
                 [] => None,
                 [other] => Some(evaluator.evaluate(alternative, *other, branch, operator)),
                 _ => Some(
-                    if has_disjoint_comparison_semantics(
+                    if has_disjoint_comparison_domain(
                         db,
                         alternative,
                         keyless_other_semantics.as_ref(),
+                        keyless_other_identity_domains.as_ref(),
                         operator,
                     ) {
                         operator.result_from_equality(false)
@@ -1035,10 +1039,11 @@ fn evaluate_finite_domains<'db>(
                     .iter()
                     .map(|other| evaluator.evaluate(alternative, *other, branch, operator)),
             )
-        } else if has_disjoint_comparison_semantics(
+        } else if has_disjoint_comparison_domain(
             db,
             alternative,
             right_semantics.as_ref(),
+            right_identity_domains.as_ref(),
             operator,
         ) {
             operator.result_from_equality(false)
@@ -1064,17 +1069,67 @@ fn finite_domain_comparison_semantics(
     Some(semantics)
 }
 
-fn has_disjoint_comparison_semantics(
+fn finite_domain_identity_domains<'db>(
+    db: &'db dyn Db,
+    alternatives: &[Type<'db>],
+    operator: ComparisonOperator,
+) -> Option<FxHashSet<Type<'db>>> {
+    alternatives
+        .iter()
+        .map(|alternative| finite_identity_domain(db, *alternative, operator))
+        .collect()
+}
+
+fn has_disjoint_comparison_domain(
     db: &dyn Db,
     alternative: Type,
     other_semantics: Option<&FxHashSet<KnownComparisonSemantics>>,
+    other_identity_domains: Option<&FxHashSet<Type>>,
     operator: ComparisonOperator,
 ) -> bool {
     let Some(other_semantics) = other_semantics else {
         return false;
     };
-    KnownComparisonSemantics::of_type(db, alternative, operator)
-        .is_some_and(|semantics| !other_semantics.contains(&semantics))
+    let Some(semantics) = KnownComparisonSemantics::of_type(db, alternative, operator) else {
+        return false;
+    };
+    if !other_semantics.contains(&semantics) {
+        return true;
+    }
+    semantics == KnownComparisonSemantics::Object
+        && finite_identity_domain(db, alternative, operator).is_some_and(|domain| {
+            other_identity_domains.is_some_and(|other| !other.contains(&domain))
+        })
+}
+
+fn finite_identity_domain<'db>(
+    db: &'db dyn Db,
+    ty: Type<'db>,
+    operator: ComparisonOperator,
+) -> Option<Type<'db>> {
+    if KnownComparisonSemantics::of_type(db, ty, operator) != Some(KnownComparisonSemantics::Object)
+    {
+        return None;
+    }
+
+    match ty {
+        Type::LiteralValue(literal) => match literal.kind() {
+            LiteralValueTypeKind::Enum(enum_literal) => Some(enum_literal.enum_class_instance(db)),
+            _ => None,
+        },
+        Type::EnumComplement(complement) => {
+            Some(complement.enum_class(db).to_non_generic_instance(db))
+        }
+        Type::Intersection(intersection) => Some(
+            intersection
+                .enum_complement(db)?
+                .enum_class(db)
+                .to_non_generic_instance(db),
+        ),
+        Type::NominalInstance(_) => Some(ty),
+        _ if ty.is_singleton(db) => Some(ty),
+        _ => None,
+    }
 }
 
 /// Return the type used to group values that are known to compare equal.

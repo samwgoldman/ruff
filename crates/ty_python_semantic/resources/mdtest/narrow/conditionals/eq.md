@@ -394,6 +394,32 @@ def _(value: Status | None, other: Status):
         reveal_type(value)  # revealed: Status
 ```
 
+Disjoint final classes are removed from object-identity enum comparisons:
+
+```py
+from enum import Enum
+from typing import final
+
+class IdentityEnum(Enum):
+    FIRST = 1
+    SECOND = 2
+
+@final
+class A: ...
+
+@final
+class B: ...
+
+def _(value: IdentityEnum | A | B, other: IdentityEnum):
+    if value == other:
+        reveal_type(value)  # revealed: IdentityEnum
+
+    if value != other:
+        pass
+    else:
+        reveal_type(value)  # revealed: IdentityEnum
+```
+
 Finite-domain comparisons ignore whether literal types are promotable:
 
 ```py
