@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -48,7 +49,13 @@ class Tool(abc.ABC):
         return None
 
     @abc.abstractmethod
-    def command(self, project: Project, venv: Venv, single_threaded: bool) -> Command:
+    def command(
+        self,
+        project: Project,
+        venv: Venv,
+        single_threaded: bool,
+        max_workers: int | None = None,
+    ) -> Command:
         """Generate a command to benchmark a given tool."""
 
     @abc.abstractmethod
@@ -60,8 +67,8 @@ class Ty(Tool):
     path: Path
     _name: str
 
-    def __init__(self, *, path: Path | None = None):
-        self._name = str(path) if path else "ty"
+    def __init__(self, *, path: Path | None = None, label: str | None = None):
+        self._name = label or (str(path) if path else "ty")
         executable = "ty.exe" if sys.platform == "win32" else "ty"
         self.path = (
             path or (Path(__file__) / "../../../../../target/release" / executable)
@@ -91,7 +98,13 @@ class Ty(Tool):
         )
 
     @override
-    def command(self, project: Project, venv: Venv, single_threaded: bool) -> Command:
+    def command(
+        self,
+        project: Project,
+        venv: Venv,
+        single_threaded: bool,
+        max_workers: int | None = None,
+    ) -> Command:
         command = [
             str(self.path),
             "check",
@@ -112,17 +125,34 @@ class Ty(Tool):
 class Mypy(Tool):
     path: Path | None
     warm: bool
+    workers: int | None
 
-    def __init__(self, *, warm: bool, path: Path | None = None):
+    def __init__(
+        self,
+        *,
+        warm: bool,
+        path: Path | None = None,
+        workers: int | None = None,
+    ):
         self.path = path
         self.warm = warm
+        self.workers = workers
 
     @override
     def name(self) -> str:
-        return "mypy"
+        name = "mypy (warm)" if self.warm else "mypy"
+        if self.workers is not None:
+            name = f"{name} -n {self.workers}"
+        return name
 
     @override
-    def command(self, project: Project, venv: Venv, single_threaded: bool) -> Command:
+    def command(
+        self,
+        project: Project,
+        venv: Venv,
+        single_threaded: bool,
+        max_workers: int | None = None,
+    ) -> Command:
         path = self.path or which_tool("mypy", venv.bin)
         command = [
             str(path),
@@ -147,7 +177,9 @@ class Mypy(Tool):
                 ]
             )
 
-        if not self.warm:
+        prepare = None
+
+        if not self.warm and self.workers is None:
             command.extend(
                 [
                     "--no-incremental",
@@ -155,10 +187,20 @@ class Mypy(Tool):
                     os.devnull,
                 ]
             )
+        elif not self.warm:
+            cache_dir = f".mypy_cache_benchmark_n{self.workers}"
+            command.extend(["--cache-dir", cache_dir])
+            prepare = f"rm -rf {shlex.quote(cache_dir)}"
+
+        if self.workers is not None:
+            command.extend(
+                ["--local-partial-types", "--num-workers", str(self.workers)]
+            )
 
         return Command(
-            name="mypy (warm)" if self.warm else "mypy",
+            name=self.name(),
             command=command,
+            prepare=prepare,
         )
 
     @override
@@ -170,8 +212,10 @@ class Mypy(Tool):
 class Pyright(Tool):
     path: Path
     lsp_path: Path
+    workers: int | None
 
-    def __init__(self, *, path: Path | None = None):
+    def __init__(self, *, path: Path | None = None, workers: int | None = None):
+        self.workers = workers
         if path:
             self.path = path
             # Assume langserver is in the same directory.
@@ -190,7 +234,9 @@ class Pyright(Tool):
 
     @override
     def name(self) -> str:
-        return "pyright"
+        if self.workers is None:
+            return "Pyright"
+        return f"Pyright --threads {self.workers}"
 
     @override
     def config(self, project: Project, venv: Venv):
@@ -209,11 +255,27 @@ class Pyright(Tool):
             ),
         )
 
-    def command(self, project: Project, venv: Venv, single_threaded: bool) -> Command:
+    def command(
+        self,
+        project: Project,
+        venv: Venv,
+        single_threaded: bool,
+        max_workers: int | None = None,
+    ) -> Command:
         command = [str(self.path), "--skipunannotated"]
 
-        if not single_threaded:
+        command_name = self.name()
+        if single_threaded:
+            command.extend(["--threads", "1"])
+            if self.workers is None:
+                command_name = "Pyright --threads 1"
+        else:
+            threads = self.workers if self.workers is not None else max_workers
             command.append("--threads")
+            if threads is not None:
+                command.append(str(threads))
+                if self.workers is None:
+                    command_name = f"Pyright --threads {threads}"
 
         command.extend(
             [
@@ -225,7 +287,7 @@ class Pyright(Tool):
         )
 
         return Command(
-            name="Pyright",
+            name=command_name,
             command=command,
         )
 
@@ -237,13 +299,15 @@ class Pyright(Tool):
 
 class Pyrefly(Tool):
     path: Path
+    label: str
 
-    def __init__(self, *, path: Path | None = None):
+    def __init__(self, *, path: Path | None = None, label: str = "Pyrefly"):
         self.path = path or which_tool("pyrefly")
+        self.label = label
 
     @override
     def name(self) -> str:
-        return "pyrefly"
+        return self.label
 
     @override
     def config(self, project: Project, venv: Venv):
@@ -261,7 +325,13 @@ class Pyrefly(Tool):
         )
 
     @override
-    def command(self, project: Project, venv: Venv, single_threaded: bool) -> Command:
+    def command(
+        self,
+        project: Project,
+        venv: Venv,
+        single_threaded: bool,
+        max_workers: int | None = None,
+    ) -> Command:
         command = [
             str(self.path),
             "check",
@@ -270,9 +340,11 @@ class Pyrefly(Tool):
 
         if single_threaded:
             command.extend(["--threads", "1"])
+        elif max_workers is not None:
+            command.extend(["--threads", str(max_workers)])
 
         return Command(
-            name="Pyrefly",
+            name=self.label,
             command=command,
         )
 

@@ -34,6 +34,12 @@ class Project(NamedTuple):
 
     edit: IncrementalEdit | None = None
 
+    file_replacements: tuple[tuple[str, str, str], ...] = ()
+    """Project-local file edits to apply after cloning and before dependency install.
+
+    Each replacement is `(relative_path, old_text, new_text)`.
+    """
+
     def clone(self, checkout_dir: Path) -> None:
         # Skip cloning if the project has already been cloned (the script doesn't yet support updating)
         if (checkout_dir / ".git").exists():
@@ -96,6 +102,18 @@ class Project(NamedTuple):
 
         logging.info(f"Cloned {self.name} to {checkout_dir}.")
 
+    def prepare_checkout(self, checkout_dir: Path) -> None:
+        """Apply benchmark-local compatibility patches after cloning."""
+
+        for relative_path, old_text, new_text in self.file_replacements:
+            path = checkout_dir / relative_path
+            text = path.read_text()
+            if old_text not in text:
+                raise RuntimeError(
+                    f"Could not find expected text in {path}: {old_text!r}"
+                )
+            path.write_text(text.replace(old_text, new_text))
+
 
 class IncrementalEdit(NamedTuple):
     """Description of an edit to measure incremental performance"""
@@ -156,7 +174,9 @@ ALL: Final = [
         name="discord.py",
         repository="https://github.com/Rapptz/discord.py.git",
         revision="9be91cb093402f54a44726c7dc4c04ff3b2c5a63",
-        python_version="3.8",
+        # mypy 2.x no longer supports analyzing Python 3.8 targets. Use the
+        # same supported target for every checker in this comparison.
+        python_version="3.10",
         include=["discord"],
         install_arguments=[
             "-r",
@@ -187,6 +207,18 @@ ALL: Final = [
             "-r",
             "requirements.txt",
         ],
+        file_replacements=(
+            (
+                "requirements_test.txt",
+                "librt==0.2.1",
+                "librt>=0.6.2",
+            ),
+            (
+                "requirements_test.txt",
+                "mypy-dev==1.19.0a4",
+                "mypy==1.19.0",
+            ),
+        ),
         edit=IncrementalEdit(
             edited_file="homeassistant/core.py",
             affected_files=["homeassistant/helpers/event.py"],

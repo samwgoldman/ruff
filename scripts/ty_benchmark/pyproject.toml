@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 benchmark = "benchmark.run:main"
+benchmark-summary = "benchmark.summarize:main"
 
 [build-system]
 requires = ["hatchling"]

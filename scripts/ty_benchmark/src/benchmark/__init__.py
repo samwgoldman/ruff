@@ -39,10 +39,10 @@ class Hyperfine(NamedTuple):
     verbose: bool
     """Whether to print verbose output."""
 
-    json: bool
-    """Whether to export results to JSON."""
+    json: bool | Path
+    """Whether to export results to JSON, or the path to write JSON to."""
 
-    def run(self, *, cwd: Path | None = None, env: Mapping[str, str]) -> None:
+    def run(self, *, cwd: Path | None = None, env: Mapping[str, str]) -> int:
         """Run the benchmark using `hyperfine`."""
         args = [
             "hyperfine",
@@ -56,7 +56,10 @@ class Hyperfine(NamedTuple):
 
         # Export to JSON.
         if self.json:
-            args.extend(["--export-json", f"{self.name}.json"])
+            json_path = (
+                self.json if isinstance(self.json, Path) else Path(f"{self.name}.json")
+            )
+            args.extend(["--export-json", str(json_path)])
 
         # Preamble: benchmark-wide setup.
         if self.verbose:
@@ -78,4 +81,5 @@ class Hyperfine(NamedTuple):
 
         logging.info(f"Running {args}")
 
-        subprocess.run(args, cwd=cwd, env=env)
+        result = subprocess.run(args, cwd=cwd, env=env)
+        return result.returncode

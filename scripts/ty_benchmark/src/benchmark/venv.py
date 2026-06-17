@@ -58,7 +58,12 @@ class Venv:
 
         return Venv(project_name=project, project_path=parent)
 
-    def install(self, pip_install_args: list[str]) -> None:
+    def install(
+        self,
+        pip_install_args: list[str],
+        *,
+        mypy_requirement: str | None = "mypy",
+    ) -> None:
         """Installs the dependencies required to type check the project."""
 
         logging.debug(f"Installing dependencies: {', '.join(pip_install_args)}")
@@ -75,7 +80,6 @@ class Venv:
             # annotations of one of that project's dependencies
             "--exclude-newer",
             "2025-12-13T00:00:00Z",
-            "mypy",  # We need to install mypy into the virtual environment or it fails to load plugins.
             *pip_install_args,
         ]
 
@@ -92,3 +96,33 @@ class Venv:
                 f"Failed to install dependencies for {self.project_name}:\n\n{e.stderr}"
             )
             raise RuntimeError(msg) from e
+
+        # We need to install mypy into the virtual environment or it fails to
+        # load project-local plugins. Keep this separate from the dependency
+        # install above so callers can pin a newer mypy than the project's
+        # dependency cutoff allows.
+        if mypy_requirement:
+            command = [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                self.python.as_posix(),
+                "--quiet",
+                mypy_requirement,
+            ]
+
+            try:
+                subprocess.run(
+                    command,
+                    cwd=self.project_path,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as e:
+                msg = (
+                    f"Failed to install {mypy_requirement} for "
+                    f"{self.project_name}:\n\n{e.stderr}"
+                )
+                raise RuntimeError(msg) from e
