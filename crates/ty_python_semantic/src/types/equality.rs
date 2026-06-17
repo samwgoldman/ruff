@@ -1005,13 +1005,6 @@ fn evaluate_finite_domains<'db>(
 
     let right_semantics = finite_domain_comparison_semantics(db, right, operator);
     let expanded_right_domain = UnionType::from_elements(db, right.iter().copied());
-    if let Some(left_semantics) = finite_domain_comparison_semantics(db, left, operator)
-        && let Some(right_semantics) = right_semantics.as_ref()
-        && left_semantics.is_disjoint(right_semantics)
-    {
-        return operator.result_from_equality(false);
-    }
-
     let mut other_keys = FxHashSet::default();
     let mut keyless_others = Vec::new();
     for alternative in right {
@@ -1090,15 +1083,10 @@ fn finite_domain_comparison_semantics(
     alternatives: &[Type],
     operator: ComparisonOperator,
 ) -> Option<FxHashSet<KnownComparisonSemantics>> {
-    let mut semantics = FxHashSet::default();
-    for alternative in alternatives {
-        semantics.insert(KnownComparisonSemantics::of_type(
-            db,
-            *alternative,
-            operator,
-        )?);
-    }
-    Some(semantics)
+    alternatives
+        .iter()
+        .map(|alternative| KnownComparisonSemantics::of_type(db, *alternative, operator))
+        .collect()
 }
 
 fn has_disjoint_comparison_domain(
@@ -1186,8 +1174,8 @@ fn finite_domain_expansion_is_bounded(
             alternatives
                 .iter()
                 .filter(|alternative| finite_comparison_key(db, **alternative, operator).is_none())
-                .count()
-                <= 1
+                .nth(1)
+                .is_none()
         })
 }
 
@@ -1769,6 +1757,8 @@ mod tests {
 
     use super::*;
 
+    const DOMAIN_SIZE: usize = 80;
+
     fn large_domain_source(domain_size: usize) -> Result<String, std::fmt::Error> {
         let mut source = String::from("from enum import Enum\n\nclass LargeEnum(Enum):\n");
         for index in 0..domain_size {
@@ -1805,7 +1795,7 @@ mod tests {
         Ok(())
     }
 
-    fn comparison_evaluations(source: String) -> anyhow::Result<usize> {
+    fn assert_evaluations_below(source: String, upper_bound: usize) -> anyhow::Result<()> {
         let mut db = setup_db();
         db.write_file("/src/a.py", source)?;
         let module = system_path_to_file(&db, "/src/a.py").expect("file should exist");
@@ -1820,59 +1810,38 @@ mod tests {
             ComparisonOperator::Equality,
         );
 
-        Ok(evaluator.evaluations)
+        assert!(
+            evaluator.evaluations < upper_bound,
+            "comparison evaluation should remain linear, but performed {} evaluations",
+            evaluator.evaluations,
+        );
+
+        Ok(())
     }
 
     #[test]
     fn unbounded_finite_domain_expansion_is_linear() -> anyhow::Result<()> {
-        const DOMAIN_SIZE: usize = 80;
-
         let mut source = large_domain_source(DOMAIN_SIZE)?;
         write!(&mut source, "\nleft: LargeEnum | None\nright: ")?;
         write_open_union(&mut source, DOMAIN_SIZE)?;
-        let evaluations = comparison_evaluations(source)?;
-
-        assert!(
-            evaluations < DOMAIN_SIZE * 3,
-            "comparison evaluation should remain linear, but performed {evaluations} evaluations",
-        );
-
-        Ok(())
+        assert_evaluations_below(source, DOMAIN_SIZE * 3)
     }
 
     #[test]
     fn opaque_target_arms_keep_finite_domain_grouped() -> anyhow::Result<()> {
-        const DOMAIN_SIZE: usize = 80;
-
         let mut source = large_domain_source(DOMAIN_SIZE)?;
         write!(&mut source, "\nleft: LargeEnum | ")?;
         write_open_union(&mut source, DOMAIN_SIZE)?;
         source.push_str("\nright: LargeEnum");
-        let evaluations = comparison_evaluations(source)?;
-
-        assert!(
-            evaluations < DOMAIN_SIZE * 3,
-            "comparison evaluation should remain linear, but performed {evaluations} evaluations",
-        );
-
-        Ok(())
+        assert_evaluations_below(source, DOMAIN_SIZE * 3)
     }
 
     #[test]
     fn dynamic_target_arm_keeps_finite_domain_grouped() -> anyhow::Result<()> {
-        const DOMAIN_SIZE: usize = 80;
-
         let mut source = String::from(
             "from typing import Any, Literal\n\nclass Marker: ...\n\nleft: Any | Marker\nright: ",
         );
         write_int_literal_union(&mut source, DOMAIN_SIZE)?;
-        let evaluations = comparison_evaluations(source)?;
-
-        assert!(
-            evaluations < DOMAIN_SIZE * 2,
-            "comparison evaluation should remain linear, but performed {evaluations} evaluations",
-        );
-
-        Ok(())
+        assert_evaluations_below(source, DOMAIN_SIZE * 2)
     }
 }

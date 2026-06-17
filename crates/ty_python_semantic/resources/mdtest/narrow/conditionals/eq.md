@@ -284,29 +284,8 @@ def _(answer: CoupledInequality):
         reveal_type(answer)  # revealed: CoupledInequality
 ```
 
-Finite domains remain narrowable when the other operand also includes an identity singleton:
-
-```py
-from enum import Enum
-from typing import Literal
-
-class Finite(Enum):
-    FIRST = 1
-    SECOND = 2
-
-def _(value: Finite, other: Literal[Finite.FIRST] | None):
-    if value == other:
-        reveal_type(value)  # revealed: Literal[Finite.FIRST]
-    else:
-        reveal_type(value)  # revealed: Finite
-
-    if value != other:
-        reveal_type(value)  # revealed: Finite
-    else:
-        reveal_type(value)  # revealed: Literal[Finite.FIRST]
-```
-
-A single open alternative does not prevent finite-domain narrowing:
+Finite domains remain narrowable when the other operand includes an identity singleton or a single
+open alternative:
 
 ```py
 from enum import Enum
@@ -319,6 +298,17 @@ class Finite(Enum):
 @final
 class Other: ...
 
+def _(value: Finite, other: Literal[Finite.FIRST] | None):
+    if value == other:
+        reveal_type(value)  # revealed: Literal[Finite.FIRST]
+    else:
+        reveal_type(value)  # revealed: Finite
+
+    if value != other:
+        reveal_type(value)  # revealed: Finite
+    else:
+        reveal_type(value)  # revealed: Literal[Finite.FIRST]
+
 def _(value: Finite | None, other: Literal[Finite.FIRST] | Other):
     if value == other:
         reveal_type(value)  # revealed: Literal[Finite.FIRST]
@@ -329,7 +319,7 @@ def _(value: Finite | None, other: Literal[Finite.FIRST] | Other):
         reveal_type(value)  # revealed: Literal[Finite.FIRST]
 ```
 
-Skipping finite-domain expansion preserves disjointness:
+Skipping finite-domain expansion preserves disjointness, including for enum complements:
 
 ```py
 from enum import Enum
@@ -353,46 +343,29 @@ def _(value: Finite | None, other: A | B):
         pass
     else:
         reveal_type(value)  # revealed: Never
-```
 
-Skipping expansion also preserves disjointness for enum complements:
-
-```py
-from enum import Enum
-from typing import final
-
-class ComplementFinite(Enum):
-    FIRST = 1
-    SECOND = 2
-
-@final
-class ComplementA: ...
-
-@final
-class ComplementB: ...
-
-def _(value: ComplementFinite, flag: bool):
-    if value is ComplementFinite.FIRST:
+def _(value: Finite, flag: bool):
+    if value is Finite.FIRST:
         return
 
-    other = ComplementA() if flag else ComplementB()
+    other = A() if flag else B()
     if value != other:
         pass
     else:
         reveal_type(value)  # revealed: Never
 ```
 
-Expanded domains preserve disjointness for alternatives without finite comparison keys:
+Finite alternatives without comparison keys preserve disjointness and resolvable union arms:
 
 ```py
 from enum import IntEnum
 from typing import Literal
 
-class FiniteInt(IntEnum):
-    FIRST = 1
-    SECOND = 2
+class Status(IntEnum):
+    READY = 1
+    DONE = 2
 
-def _(value: FiniteInt, other: Literal["a", "b"]):
+def _(value: Status, other: Literal["a", "b"]):
     if value == other:
         reveal_type(value)  # revealed: Never
 
@@ -400,16 +373,6 @@ def _(value: FiniteInt, other: Literal["a", "b"]):
         pass
     else:
         reveal_type(value)  # revealed: Never
-```
-
-Finite alternatives without comparison keys still preserve resolvable union arms:
-
-```py
-from enum import IntEnum
-
-class Status(IntEnum):
-    READY = 1
-    DONE = 2
 
 def _(value: Status | None, other: Status):
     if value == other:
