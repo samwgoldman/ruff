@@ -759,6 +759,10 @@ def _(x: Any):
     if x != Marker:
         reveal_type(x)  # revealed: Any & ~<class 'Marker'>
 
+def _(x: Any, y: Color | None):
+    if x != y:
+        reveal_type(x)  # revealed: Any
+
 def _(x: T):
     if x != Color.RED:
         reveal_type(x)  # revealed: T@_ & ~Literal[Color.RED]

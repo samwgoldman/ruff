@@ -330,6 +330,13 @@ fn evaluate_comparison_once<'db>(
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
 
+    if matches!(left, Type::Dynamic(_))
+        && finite_alternatives(db, right, operator)
+            .is_some_and(|alternatives| alternatives.len() > 1)
+    {
+        return evaluate_dynamic_target(evaluator, left, right, branch, operator);
+    }
+
     let expand_finite_domains =
         expand_finite_domains && finite_domain_expansion_is_bounded(db, left, right, operator);
     if expand_finite_domains {
@@ -390,18 +397,7 @@ fn evaluate_comparison_once<'db>(
         ) => ComparisonResult::Ambiguous,
 
         (Type::Dynamic(_), other) => {
-            if !operator.condition_expects_equality(branch)
-                && all_values_compare_equal(evaluator, other, operator)
-            {
-                ComparisonResult::CanNarrow(
-                    IntersectionBuilder::new(db)
-                        .add_positive(left)
-                        .add_negative(other)
-                        .build(),
-                )
-            } else {
-                ComparisonResult::Ambiguous
-            }
+            evaluate_dynamic_target(evaluator, left, other, branch, operator)
         }
         (_, Type::Dynamic(_)) => ComparisonResult::Ambiguous,
 
@@ -549,6 +545,27 @@ fn evaluate_comparison_once<'db>(
         }
 
         _ => ComparisonResult::Ambiguous,
+    }
+}
+
+fn evaluate_dynamic_target<'db>(
+    evaluator: &mut ComparisonEvaluator<'db>,
+    target: Type<'db>,
+    other: Type<'db>,
+    branch: ComparisonBranch,
+    operator: ComparisonOperator,
+) -> ComparisonResult<'db> {
+    if !operator.condition_expects_equality(branch)
+        && all_values_compare_equal(evaluator, other, operator)
+    {
+        ComparisonResult::CanNarrow(
+            IntersectionBuilder::new(evaluator.db)
+                .add_positive(target)
+                .add_negative(other)
+                .build(),
+        )
+    } else {
+        ComparisonResult::Ambiguous
     }
 }
 
