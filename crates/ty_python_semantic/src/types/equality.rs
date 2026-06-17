@@ -271,7 +271,7 @@ impl<'db> ComparisonEvaluator<'db> {
         self.evaluate_impl(left, right, branch, operator, true)
     }
 
-    /// Evaluate after type-variable expansion without re-expanding finite domains.
+    /// Evaluate while preserving finite domains as grouped operands.
     fn evaluate_without_finite_expansion(
         &mut self,
         left: Type<'db>,
@@ -330,11 +330,26 @@ fn evaluate_comparison_once<'db>(
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
 
-    if matches!(left, Type::Dynamic(_))
+    let dynamic_target = matches!(left, Type::Dynamic(_))
+        || matches!(left, Type::Union(union) if union.elements(db).iter().any(|element| {
+            matches!(element.resolve_type_alias(db), Type::Dynamic(_))
+        }));
+    if dynamic_target
         && finite_alternatives(db, right, operator)
             .is_some_and(|alternatives| alternatives.len() > 1)
     {
-        return evaluate_dynamic_target(evaluator, left, right, branch, operator);
+        return if let Type::Union(union) = left {
+            evaluate_union_left(
+                evaluator,
+                union.elements(db),
+                right,
+                branch,
+                operator,
+                false,
+            )
+        } else {
+            evaluate_dynamic_target(evaluator, left, right, branch, operator)
+        };
     }
 
     let expand_finite_domains =
@@ -973,9 +988,8 @@ fn evaluate_intersection_left<'db>(
 
 /// Compare two lists of possible runtime values without evaluating every pair.
 ///
-/// Finite alternatives are matched by key. A single keyless alternative is evaluated directly;
-/// larger keyless domains are summarized by their known comparison semantics, keeping the
-/// comparison linear in the number of alternatives.
+/// Finite alternatives are matched by key. Opaque alternatives are evaluated once against a
+/// grouped domain, keeping enum expansion from creating a Cartesian product.
 fn evaluate_finite_domains<'db>(
     evaluator: &mut ComparisonEvaluator<'db>,
     left: &[Type<'db>],
@@ -990,6 +1004,7 @@ fn evaluate_finite_domains<'db>(
     }
 
     let right_semantics = finite_domain_comparison_semantics(db, right, operator);
+    let expanded_right_domain = UnionType::from_elements(db, right.iter().copied());
     if let Some(left_semantics) = finite_domain_comparison_semantics(db, left, operator)
         && let Some(right_semantics) = right_semantics.as_ref()
         && left_semantics.is_disjoint(right_semantics)
@@ -1060,12 +1075,12 @@ fn evaluate_finite_domains<'db>(
         ) {
             operator.result_from_equality(false)
         } else {
-            evaluator.evaluate_without_finite_expansion(
-                alternative,
-                original_right,
-                branch,
-                operator,
-            )
+            let right = if KnownComparisonSemantics::of_type(db, alternative, operator).is_some() {
+                expanded_right_domain
+            } else {
+                original_right
+            };
+            evaluator.evaluate_without_finite_expansion(alternative, right, branch, operator)
         }
     })
 }
@@ -1197,6 +1212,9 @@ fn finite_domain_expansion_may_grow(db: &dyn Db, ty: Type, operator: ComparisonO
 }
 
 /// Expand known finite domains while preserving unexpanded union elements.
+///
+/// Multi-value domains are expanded only when every alternative has an exact comparison key.
+/// A singleton is also safe to expand because it cannot create a Cartesian product.
 ///
 /// Enum classes with custom comparison methods are deliberately not expanded because their members
 /// may compare equal to values outside the enum domain.
@@ -1772,6 +1790,21 @@ mod tests {
         Ok(())
     }
 
+    fn write_int_literal_union(
+        source: &mut String,
+        domain_size: usize,
+    ) -> Result<(), std::fmt::Error> {
+        source.push_str("Literal[");
+        for index in 0..domain_size {
+            if index > 0 {
+                source.push_str(", ");
+            }
+            write!(source, "{index}")?;
+        }
+        source.push(']');
+        Ok(())
+    }
+
     fn comparison_evaluations(source: String) -> anyhow::Result<usize> {
         let mut db = setup_db();
         db.write_file("/src/a.py", source)?;
@@ -1819,6 +1852,24 @@ mod tests {
 
         assert!(
             evaluations < DOMAIN_SIZE * 3,
+            "comparison evaluation should remain linear, but performed {evaluations} evaluations",
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_target_arm_keeps_finite_domain_grouped() -> anyhow::Result<()> {
+        const DOMAIN_SIZE: usize = 80;
+
+        let mut source = String::from(
+            "from typing import Any, Literal\n\nclass Marker: ...\n\nleft: Any | Marker\nright: ",
+        );
+        write_int_literal_union(&mut source, DOMAIN_SIZE)?;
+        let evaluations = comparison_evaluations(source)?;
+
+        assert!(
+            evaluations < DOMAIN_SIZE * 2,
             "comparison evaluation should remain linear, but performed {evaluations} evaluations",
         );
 
