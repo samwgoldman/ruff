@@ -931,8 +931,9 @@ fn evaluate_intersection_left<'db>(
 
 /// Compare two lists of possible runtime values without evaluating every pair.
 ///
-/// Finite alternatives are matched by key. At most one open alternative is evaluated on each side,
-/// keeping the comparison linear in the number of alternatives.
+/// Finite alternatives are matched by key. A single keyless alternative is evaluated directly;
+/// larger keyless domains are summarized by their known comparison semantics, keeping the
+/// comparison linear in the number of alternatives.
 fn evaluate_finite_domains<'db>(
     evaluator: &mut ComparisonEvaluator<'db>,
     left: &[Type<'db>],
@@ -945,28 +946,29 @@ fn evaluate_finite_domains<'db>(
         return ComparisonResult::Ambiguous;
     }
 
-    if finite_domains_have_disjoint_semantics(db, left, right, operator) {
+    let right_semantics = finite_domain_comparison_semantics(db, right, operator);
+    if let Some(left_semantics) = finite_domain_comparison_semantics(db, left, operator)
+        && let Some(right_semantics) = right_semantics.as_ref()
+        && left_semantics.is_disjoint(right_semantics)
+    {
         return operator.result_from_equality(false);
     }
 
-    if left
+    let keyless_left_count = left
         .iter()
         .filter(|alternative| finite_comparison_key(db, **alternative, operator).is_none())
-        .nth(1)
-        .is_some()
-    {
-        return ComparisonResult::Ambiguous;
-    }
+        .count();
 
     let mut other_keys = FxHashSet::default();
-    let mut open_other = None;
+    let mut keyless_others = Vec::new();
     for alternative in right {
         if let Some(key) = finite_comparison_key(db, *alternative, operator) {
             other_keys.insert(key);
-        } else if open_other.replace(*alternative).is_some() {
-            return ComparisonResult::Ambiguous;
+        } else {
+            keyless_others.push(*alternative);
         }
     }
+    let keyless_other_semantics = finite_domain_comparison_semantics(db, &keyless_others, operator);
 
     evaluate_target_union(db, left, branch, |alternative| {
         if let Some(key) = finite_comparison_key(db, alternative, operator) {
@@ -980,23 +982,34 @@ fn evaluate_finite_domains<'db>(
                 Some(ComparisonResult::Ambiguous)
             };
 
-            match (finite_result, open_other) {
-                (Some(finite_result), Some(open_other)) => evaluate_against_results(
+            let keyless_result = match keyless_others.as_slice() {
+                [] => None,
+                [other] => Some(evaluator.evaluate(alternative, *other, branch, operator)),
+                _ => Some(
+                    if has_disjoint_comparison_semantics(
+                        db,
+                        alternative,
+                        keyless_other_semantics.as_ref(),
+                        operator,
+                    ) {
+                        operator.result_from_equality(false)
+                    } else {
+                        ComparisonResult::Ambiguous
+                    },
+                ),
+            };
+
+            match (finite_result, keyless_result) {
+                (Some(finite_result), Some(keyless_result)) => evaluate_against_results(
                     db,
                     alternative,
                     branch,
-                    [
-                        finite_result,
-                        evaluator.evaluate(alternative, open_other, branch, operator),
-                    ],
+                    [finite_result, keyless_result],
                 ),
-                (Some(finite_result), None) => finite_result,
-                (None, Some(open_other)) => {
-                    evaluator.evaluate(alternative, open_other, branch, operator)
-                }
+                (Some(result), None) | (None, Some(result)) => result,
                 (None, None) => ComparisonResult::Ambiguous,
             }
-        } else {
+        } else if keyless_left_count == 1 || right.len() == 1 {
             evaluate_against_results(
                 db,
                 alternative,
@@ -1005,28 +1018,46 @@ fn evaluate_finite_domains<'db>(
                     .iter()
                     .map(|other| evaluator.evaluate(alternative, *other, branch, operator)),
             )
+        } else if has_disjoint_comparison_semantics(
+            db,
+            alternative,
+            right_semantics.as_ref(),
+            operator,
+        ) {
+            operator.result_from_equality(false)
+        } else {
+            ComparisonResult::Ambiguous
         }
     })
 }
 
-fn finite_domains_have_disjoint_semantics(
+fn finite_domain_comparison_semantics(
     db: &dyn Db,
-    left: &[Type],
-    right: &[Type],
+    alternatives: &[Type],
+    operator: ComparisonOperator,
+) -> Option<FxHashSet<KnownComparisonSemantics>> {
+    let mut semantics = FxHashSet::default();
+    for alternative in alternatives {
+        semantics.insert(KnownComparisonSemantics::of_type(
+            db,
+            *alternative,
+            operator,
+        )?);
+    }
+    Some(semantics)
+}
+
+fn has_disjoint_comparison_semantics(
+    db: &dyn Db,
+    alternative: Type,
+    other_semantics: Option<&FxHashSet<KnownComparisonSemantics>>,
     operator: ComparisonOperator,
 ) -> bool {
-    let mut left_semantics = FxHashSet::default();
-    for alternative in left {
-        let Some(semantics) = KnownComparisonSemantics::of_type(db, *alternative, operator) else {
-            return false;
-        };
-        left_semantics.insert(semantics);
-    }
-
-    right.iter().all(|alternative| {
-        KnownComparisonSemantics::of_type(db, *alternative, operator)
-            .is_some_and(|semantics| !left_semantics.contains(&semantics))
-    })
+    let Some(other_semantics) = other_semantics else {
+        return false;
+    };
+    KnownComparisonSemantics::of_type(db, alternative, operator)
+        .is_some_and(|semantics| !other_semantics.contains(&semantics))
 }
 
 /// Return the type used to group values that are known to compare equal.

@@ -375,6 +375,25 @@ def _(value: FiniteInt, other: Literal["a", "b"]):
         reveal_type(value)  # revealed: Never
 ```
 
+Finite alternatives without comparison keys still preserve resolvable union arms:
+
+```py
+from enum import IntEnum
+
+class Status(IntEnum):
+    READY = 1
+    DONE = 2
+
+def _(value: Status | None, other: Status):
+    if value == other:
+        reveal_type(value)  # revealed: Status
+
+    if value != other:
+        pass
+    else:
+        reveal_type(value)  # revealed: Status
+```
+
 Finite-domain comparisons ignore whether literal types are promotable:
 
 ```py
