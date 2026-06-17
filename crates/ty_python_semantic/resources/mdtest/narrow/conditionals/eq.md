@@ -306,6 +306,31 @@ def _(value: Finite, other: Literal[Finite.FIRST] | None):
         reveal_type(value)  # revealed: Literal[Finite.FIRST]
 ```
 
+Finite-domain comparisons ignore whether literal types are promotable:
+
+```py
+from enum import Enum
+from typing import Literal
+
+class StringFinite(str, Enum):
+    FIRST = "first"
+    SECOND = "second"
+
+class BytesFinite(bytes, Enum):
+    FIRST = b"first"
+    SECOND = b"second"
+
+def _(value: StringFinite, other: Literal["first", "other"]):
+    if value == other:
+        reveal_type(value)  # revealed: Literal[StringFinite.FIRST]
+        reveal_type(other)  # revealed: Literal["first"]
+
+def _(value: BytesFinite, other: Literal[b"first", b"other"]):
+    if value == other:
+        reveal_type(value)  # revealed: Literal[BytesFinite.FIRST]
+        reveal_type(other)  # revealed: Literal[b"first"]
+```
+
 ## Known built-in equality behavior
 
 `bool`, `LiteralString`, `TypedDict`, and final classes that inherit `object.__eq__` have known
@@ -709,6 +734,11 @@ def _(b: bool, i: Literal[1, 2]):
         reveal_type(i)  # revealed: Literal[1]
     else:
         reveal_type(i)  # revealed: Literal[2]
+
+def _(b: bool, i: Literal[0, 2]):
+    if b == i:
+        reveal_type(b)  # revealed: Literal[False]
+        reveal_type(i)  # revealed: Literal[0]
 ```
 
 ## Final subclasses of scalar builtins

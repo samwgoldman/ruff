@@ -10,8 +10,9 @@ use rustc_hash::FxHashSet;
 use crate::{Db, place::PlaceAndQualifiers};
 
 use super::{
-    EnumLiteralType, IntersectionBuilder, KnownBoundMethodType, KnownClass, LiteralValueTypeKind,
-    MemberLookupPolicy, Truthiness, Type, TypeVarBoundOrConstraints, UnionBuilder, UnionType,
+    EnumLiteralType, IntersectionBuilder, KnownBoundMethodType, KnownClass, LiteralValueType,
+    LiteralValueTypeKind, MemberLookupPolicy, Truthiness, Type, TypeVarBoundOrConstraints,
+    UnionBuilder, UnionType,
     enums::{enum_member_literals, enum_metadata},
 };
 
@@ -975,9 +976,9 @@ fn finite_comparison_key<'db>(
 
     match literal {
         LiteralValueTypeKind::Bool(value) => Some(Type::int_literal(i64::from(value))),
-        LiteralValueTypeKind::Int(_)
-        | LiteralValueTypeKind::String(_)
-        | LiteralValueTypeKind::Bytes(_) => Some(ty),
+        LiteralValueTypeKind::Int(value) => Some(Type::int_literal(value.as_i64())),
+        LiteralValueTypeKind::String(value) => Some(LiteralValueType::promotable(value).into()),
+        LiteralValueTypeKind::Bytes(value) => Some(LiteralValueType::promotable(value).into()),
         LiteralValueTypeKind::LiteralString => None,
         LiteralValueTypeKind::Enum(enum_literal) => {
             match KnownComparisonSemantics::of_instance(
