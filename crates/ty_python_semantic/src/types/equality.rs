@@ -920,6 +920,10 @@ fn evaluate_finite_domains<'db>(
         return ComparisonResult::Ambiguous;
     }
 
+    if finite_domains_have_disjoint_semantics(db, left, right, operator) {
+        return operator.result_from_equality(false);
+    }
+
     if left
         .iter()
         .filter(|alternative| finite_comparison_key(db, **alternative, operator).is_none())
@@ -977,6 +981,26 @@ fn evaluate_finite_domains<'db>(
                     .map(|other| evaluator.evaluate(alternative, *other, branch, operator)),
             )
         }
+    })
+}
+
+fn finite_domains_have_disjoint_semantics(
+    db: &dyn Db,
+    left: &[Type],
+    right: &[Type],
+    operator: ComparisonOperator,
+) -> bool {
+    let mut left_semantics = FxHashSet::default();
+    for alternative in left {
+        let Some(semantics) = KnownComparisonSemantics::of_type(db, *alternative, operator) else {
+            return false;
+        };
+        left_semantics.insert(semantics);
+    }
+
+    right.iter().all(|alternative| {
+        KnownComparisonSemantics::of_type(db, *alternative, operator)
+            .is_some_and(|semantics| !left_semantics.contains(&semantics))
     })
 }
 
@@ -1354,7 +1378,7 @@ impl ComparisonOperator {
 ///
 /// Two types with different known semantics cannot compare equal. Types with custom or otherwise
 /// unknown comparison methods are not assigned a value of this enum.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum KnownComparisonSemantics {
     Object,
     Int,

@@ -355,6 +355,26 @@ def _(value: Finite | None, other: A | B):
         reveal_type(value)  # revealed: Never
 ```
 
+Expanded domains preserve disjointness for alternatives without finite comparison keys:
+
+```py
+from enum import IntEnum
+from typing import Literal
+
+class FiniteInt(IntEnum):
+    FIRST = 1
+    SECOND = 2
+
+def _(value: FiniteInt, other: Literal["a", "b"]):
+    if value == other:
+        reveal_type(value)  # revealed: Never
+
+    if value != other:
+        pass
+    else:
+        reveal_type(value)  # revealed: Never
+```
+
 Finite-domain comparisons ignore whether literal types are promotable:
 
 ```py
