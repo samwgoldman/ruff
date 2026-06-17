@@ -908,9 +908,10 @@ fn evaluate_intersection_left<'db>(
     }
 }
 
-/// Compare two finite lists of possible runtime values without evaluating every pair.
+/// Compare two lists of possible runtime values without evaluating every pair.
 ///
-/// This handles types such as enums and `bool`, whose possible values can be enumerated.
+/// Finite alternatives are matched by key. At most one open alternative is evaluated on each side,
+/// keeping the comparison linear in the number of alternatives.
 fn evaluate_finite_domains<'db>(
     evaluator: &mut ComparisonEvaluator<'db>,
     left: &[Type<'db>],
@@ -923,22 +924,52 @@ fn evaluate_finite_domains<'db>(
         return ComparisonResult::Ambiguous;
     }
 
-    let Some(other_keys) = right
+    if left
         .iter()
-        .map(|alternative| finite_comparison_key(db, *alternative, operator))
-        .collect::<Option<FxHashSet<_>>>()
-    else {
+        .filter(|alternative| finite_comparison_key(db, **alternative, operator).is_none())
+        .nth(1)
+        .is_some()
+    {
         return ComparisonResult::Ambiguous;
-    };
+    }
+
+    let mut other_keys = FxHashSet::default();
+    let mut open_other = None;
+    for alternative in right {
+        if let Some(key) = finite_comparison_key(db, *alternative, operator) {
+            other_keys.insert(key);
+        } else if open_other.replace(*alternative).is_some() {
+            return ComparisonResult::Ambiguous;
+        }
+    }
 
     evaluate_target_union(db, left, branch, |alternative| {
         if let Some(key) = finite_comparison_key(db, alternative, operator) {
-            if !other_keys.contains(&key) {
-                operator.result_from_equality(false)
+            let finite_result = if other_keys.is_empty() {
+                None
+            } else if !other_keys.contains(&key) {
+                Some(operator.result_from_equality(false))
             } else if other_keys.len() == 1 {
-                operator.result_from_equality(true)
+                Some(operator.result_from_equality(true))
             } else {
-                ComparisonResult::Ambiguous
+                Some(ComparisonResult::Ambiguous)
+            };
+
+            match (finite_result, open_other) {
+                (Some(finite_result), Some(open_other)) => evaluate_against_results(
+                    db,
+                    alternative,
+                    branch,
+                    [
+                        finite_result,
+                        evaluator.evaluate(alternative, open_other, branch, operator),
+                    ],
+                ),
+                (Some(finite_result), None) => finite_result,
+                (None, Some(open_other)) => {
+                    evaluator.evaluate(alternative, open_other, branch, operator)
+                }
+                (None, None) => ComparisonResult::Ambiguous,
             }
         } else {
             evaluate_against_results(
@@ -1023,7 +1054,7 @@ fn finite_domain_expansion_is_bounded(
 ) -> bool {
     !matches!(other, Type::Union(_))
         || !finite_domain_expansion_may_grow(db, target, operator)
-        || finite_comparison_domain(db, other, operator) == FiniteComparisonDomain::Finite
+        || finite_comparison_domain(db, other, operator) != FiniteComparisonDomain::None
 }
 
 fn finite_domain_expansion_may_grow(db: &dyn Db, ty: Type, operator: ComparisonOperator) -> bool {
@@ -1111,20 +1142,18 @@ fn finite_alternatives<'db>(
     match ty {
         Type::Union(union) => {
             let mut alternatives = Vec::new();
-            let mut expanded_finite_domain = false;
+            let mut contains_finite_domain = false;
             for element in union.elements(db) {
                 if let Some(element_alternatives) = finite_alternatives(db, *element, operator) {
                     alternatives.extend(element_alternatives);
-                    expanded_finite_domain = true;
+                    contains_finite_domain = true;
                 } else {
+                    contains_finite_domain |=
+                        finite_comparison_key(db, *element, operator).is_some();
                     alternatives.push(*element);
                 }
             }
-            (expanded_finite_domain
-                || alternatives
-                    .iter()
-                    .all(|alternative| finite_comparison_key(db, *alternative, operator).is_some()))
-            .then_some(alternatives)
+            contains_finite_domain.then_some(alternatives)
         }
         Type::EnumComplement(complement) => KnownComparisonSemantics::of_type(db, ty, operator)
             .is_some()

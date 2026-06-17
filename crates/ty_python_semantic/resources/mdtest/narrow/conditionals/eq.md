@@ -306,6 +306,29 @@ def _(value: Finite, other: Literal[Finite.FIRST] | None):
         reveal_type(value)  # revealed: Literal[Finite.FIRST]
 ```
 
+A single open alternative does not prevent finite-domain narrowing:
+
+```py
+from enum import Enum
+from typing import Literal, final
+
+class Finite(Enum):
+    FIRST = 1
+    SECOND = 2
+
+@final
+class Other: ...
+
+def _(value: Finite | None, other: Literal[Finite.FIRST] | Other):
+    if value == other:
+        reveal_type(value)  # revealed: Literal[Finite.FIRST]
+
+    if value != other:
+        pass
+    else:
+        reveal_type(value)  # revealed: Literal[Finite.FIRST]
+```
+
 Finite-domain comparisons ignore whether literal types are promotable:
 
 ```py
