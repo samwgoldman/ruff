@@ -329,6 +329,32 @@ def _(value: Finite | None, other: Literal[Finite.FIRST] | Other):
         reveal_type(value)  # revealed: Literal[Finite.FIRST]
 ```
 
+Skipping finite-domain expansion preserves disjointness:
+
+```py
+from enum import Enum
+from typing import final
+
+class Finite(Enum):
+    FIRST = 1
+    SECOND = 2
+
+@final
+class A: ...
+
+@final
+class B: ...
+
+def _(value: Finite | None, other: A | B):
+    if value == other:
+        reveal_type(value)  # revealed: Never
+
+    if value != other:
+        pass
+    else:
+        reveal_type(value)  # revealed: Never
+```
+
 Finite-domain comparisons ignore whether literal types are promotable:
 
 ```py

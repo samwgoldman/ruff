@@ -321,11 +321,7 @@ fn evaluate_comparison_once<'db>(
 ) -> ComparisonResult<'db> {
     let db = evaluator.db;
 
-    if expand_finite_domains {
-        if !finite_domain_expansion_is_bounded(db, left, right, operator) {
-            return ComparisonResult::Ambiguous;
-        }
-
+    if expand_finite_domains && finite_domain_expansion_is_bounded(db, left, right, operator) {
         let left_alternatives = finite_alternatives(db, left, operator);
         if left == right
             && let Some(alternatives) = left_alternatives.as_deref()
