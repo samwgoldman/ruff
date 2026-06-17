@@ -447,6 +447,61 @@ def _(value: IdentityEnum | A | B, other: IdentityEnum):
         reveal_type(value)  # revealed: IdentityEnum
 ```
 
+Object-identity domains use the runtime class, not generic specializations:
+
+```py
+from enum import Enum
+from typing import Generic, TypeVar, final
+
+T_co = TypeVar("T_co", covariant=True)
+
+@final
+class Box(Generic[T_co]): ...
+
+class LeftEnum(Enum):
+    MEMBER = 1
+
+class RightEnum(Enum):
+    MEMBER = 1
+
+@final
+class Unrelated: ...
+
+def _(
+    left: LeftEnum | Box[int] | Unrelated,
+    right: RightEnum | Box[object],
+):
+    if left == right:
+        reveal_type(left)  # revealed: Box[int]
+```
+
+Mixed keyless comparison domains preserve pairwise disjointness:
+
+```py
+from enum import Enum, IntEnum
+from typing import final
+
+class PlainEnum(Enum):
+    FIRST = 1
+    SECOND = 2
+
+class NumericEnum(IntEnum):
+    FIRST = 1
+    SECOND = 2
+
+@final
+class FinalClass: ...
+
+def _(left: PlainEnum | None, right: NumericEnum | FinalClass):
+    if left == right:
+        reveal_type(left)  # revealed: Never
+
+    if left != right:
+        pass
+    else:
+        reveal_type(left)  # revealed: Never
+```
+
 Finite-domain comparisons ignore whether literal types are promotable:
 
 ```py
@@ -470,6 +525,27 @@ def _(value: BytesFinite, other: Literal[b"first", b"other"]):
     if value == other:
         reveal_type(value)  # revealed: Literal[BytesFinite.FIRST]
         reveal_type(other)  # revealed: Literal[b"first"]
+```
+
+Alternatives with the same comparison key represent one runtime value:
+
+```py
+from enum import Enum
+from typing import Any, Literal
+
+class StringEnum(str, Enum):
+    MEMBER = "member"
+
+def equal_literals(
+    left: Literal[StringEnum.MEMBER, "member"],
+    right: Literal[StringEnum.MEMBER, "member"],
+):
+    if left != right:
+        reveal_type(left)  # revealed: Never
+
+def dynamic(left: Any, right: Literal[0, False]):
+    if left != right:
+        reveal_type(left)  # revealed: Any & ~Literal[0] & ~Literal[False]
 ```
 
 ## Known built-in equality behavior
@@ -815,6 +891,10 @@ def _(x: Any):
 def _(x: Any, y: Color | None):
     if x != y:
         reveal_type(x)  # revealed: Any
+
+def _(x: Any | None, y: Literal[0, 1, 2]):
+    if x != y:
+        reveal_type(x)  # revealed: Any | None
 
 def _(x: T):
     if x != Color.RED:

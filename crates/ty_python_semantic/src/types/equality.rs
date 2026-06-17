@@ -344,7 +344,11 @@ fn evaluate_comparison_once<'db>(
         if left == right
             && let Some(alternatives) = left_alternatives.as_deref()
         {
-            return if alternatives.len() == 1 {
+            let keys = alternatives
+                .iter()
+                .map(|alternative| finite_comparison_key(db, *alternative, operator))
+                .collect::<Option<FxHashSet<_>>>();
+            return if alternatives.len() == 1 || keys.is_some_and(|keys| keys.len() == 1) {
                 operator.result_from_equality(true)
             } else {
                 ComparisonResult::Ambiguous
@@ -984,18 +988,13 @@ fn evaluate_finite_domains<'db>(
     }
 
     let right_semantics = finite_domain_comparison_semantics(db, right, operator);
-    let right_identity_domains = finite_domain_identity_domains(db, right, operator);
+    let right_domain = UnionType::from_elements(db, right.iter().copied());
     if let Some(left_semantics) = finite_domain_comparison_semantics(db, left, operator)
         && let Some(right_semantics) = right_semantics.as_ref()
         && left_semantics.is_disjoint(right_semantics)
     {
         return operator.result_from_equality(false);
     }
-
-    let keyless_left_count = left
-        .iter()
-        .filter(|alternative| finite_comparison_key(db, **alternative, operator).is_none())
-        .count();
 
     let mut other_keys = FxHashSet::default();
     let mut keyless_others = Vec::new();
@@ -1007,8 +1006,7 @@ fn evaluate_finite_domains<'db>(
         }
     }
     let keyless_other_semantics = finite_domain_comparison_semantics(db, &keyless_others, operator);
-    let keyless_other_identity_domains =
-        finite_domain_identity_domains(db, &keyless_others, operator);
+    let keyless_other_domain = UnionType::from_elements(db, keyless_others.iter().copied());
 
     evaluate_target_union(db, left, branch, |alternative| {
         if let Some(key) = finite_comparison_key(db, alternative, operator) {
@@ -1024,20 +1022,22 @@ fn evaluate_finite_domains<'db>(
 
             let keyless_result = match keyless_others.as_slice() {
                 [] => None,
-                [other] => Some(evaluator.evaluate(alternative, *other, branch, operator)),
-                _ => Some(
-                    if has_disjoint_comparison_domain(
-                        db,
-                        alternative,
-                        keyless_other_semantics.as_ref(),
-                        keyless_other_identity_domains.as_ref(),
-                        operator,
-                    ) {
-                        operator.result_from_equality(false)
-                    } else {
-                        ComparisonResult::Ambiguous
-                    },
-                ),
+                _ if has_disjoint_comparison_domain(
+                    db,
+                    alternative,
+                    keyless_other_semantics.as_ref(),
+                    keyless_other_domain,
+                    operator,
+                ) =>
+                {
+                    Some(operator.result_from_equality(false))
+                }
+                _ => Some(evaluator.evaluate_without_finite_expansion(
+                    alternative,
+                    keyless_other_domain,
+                    branch,
+                    operator,
+                )),
             };
 
             match (finite_result, keyless_result) {
@@ -1050,25 +1050,16 @@ fn evaluate_finite_domains<'db>(
                 (Some(result), None) | (None, Some(result)) => result,
                 (None, None) => ComparisonResult::Ambiguous,
             }
-        } else if keyless_left_count == 1 || right.len() == 1 {
-            evaluate_against_results(
-                db,
-                alternative,
-                branch,
-                right
-                    .iter()
-                    .map(|other| evaluator.evaluate(alternative, *other, branch, operator)),
-            )
         } else if has_disjoint_comparison_domain(
             db,
             alternative,
             right_semantics.as_ref(),
-            right_identity_domains.as_ref(),
+            right_domain,
             operator,
         ) {
             operator.result_from_equality(false)
         } else {
-            ComparisonResult::Ambiguous
+            evaluator.evaluate_without_finite_expansion(alternative, right_domain, branch, operator)
         }
     })
 }
@@ -1089,22 +1080,11 @@ fn finite_domain_comparison_semantics(
     Some(semantics)
 }
 
-fn finite_domain_identity_domains<'db>(
-    db: &'db dyn Db,
-    alternatives: &[Type<'db>],
-    operator: ComparisonOperator,
-) -> Option<FxHashSet<Type<'db>>> {
-    alternatives
-        .iter()
-        .map(|alternative| finite_identity_domain(db, *alternative, operator))
-        .collect()
-}
-
 fn has_disjoint_comparison_domain(
     db: &dyn Db,
     alternative: Type,
     other_semantics: Option<&FxHashSet<KnownComparisonSemantics>>,
-    other_identity_domains: Option<&FxHashSet<Type>>,
+    other_domain: Type,
     operator: ComparisonOperator,
 ) -> bool {
     let Some(other_semantics) = other_semantics else {
@@ -1116,40 +1096,7 @@ fn has_disjoint_comparison_domain(
     if !other_semantics.contains(&semantics) {
         return true;
     }
-    semantics == KnownComparisonSemantics::Object
-        && finite_identity_domain(db, alternative, operator).is_some_and(|domain| {
-            other_identity_domains.is_some_and(|other| !other.contains(&domain))
-        })
-}
-
-fn finite_identity_domain<'db>(
-    db: &'db dyn Db,
-    ty: Type<'db>,
-    operator: ComparisonOperator,
-) -> Option<Type<'db>> {
-    if KnownComparisonSemantics::of_type(db, ty, operator) != Some(KnownComparisonSemantics::Object)
-    {
-        return None;
-    }
-
-    match ty {
-        Type::LiteralValue(literal) => match literal.kind() {
-            LiteralValueTypeKind::Enum(enum_literal) => Some(enum_literal.enum_class_instance(db)),
-            _ => None,
-        },
-        Type::EnumComplement(complement) => {
-            Some(complement.enum_class(db).to_non_generic_instance(db))
-        }
-        Type::Intersection(intersection) => Some(
-            intersection
-                .enum_complement(db)?
-                .enum_class(db)
-                .to_non_generic_instance(db),
-        ),
-        Type::NominalInstance(_) => Some(ty),
-        _ if ty.is_singleton(db) => Some(ty),
-        _ => None,
-    }
+    semantics == KnownComparisonSemantics::Object && alternative.is_disjoint_from(db, other_domain)
 }
 
 /// Return the type used to group values that are known to compare equal.
@@ -1205,14 +1152,6 @@ fn finite_comparison_key<'db>(
     }
 }
 
-/// Whether a type can use finite-domain comparison entirely, partly, or not at all.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum FiniteComparisonDomain {
-    None,
-    Finite,
-    Mixed,
-}
-
 /// Return whether finite-domain expansion avoids a Cartesian product with an open union.
 fn finite_domain_expansion_is_bounded(
     db: &dyn Db,
@@ -1222,7 +1161,13 @@ fn finite_domain_expansion_is_bounded(
 ) -> bool {
     !matches!(other, Type::Union(_))
         || !finite_domain_expansion_may_grow(db, target, operator)
-        || finite_comparison_domain(db, other, operator) != FiniteComparisonDomain::None
+        || finite_alternatives(db, other, operator).is_some_and(|alternatives| {
+            alternatives
+                .iter()
+                .filter(|alternative| finite_comparison_key(db, **alternative, operator).is_none())
+                .count()
+                <= 1
+        })
 }
 
 fn finite_domain_expansion_may_grow(db: &dyn Db, ty: Type, operator: ComparisonOperator) -> bool {
@@ -1242,59 +1187,6 @@ fn finite_domain_expansion_may_grow(db: &dyn Db, ty: Type, operator: ComparisonO
                     && KnownComparisonSemantics::of_type(db, ty, operator).is_some())
         }
         _ => false,
-    }
-}
-
-fn finite_comparison_domain(
-    db: &dyn Db,
-    ty: Type,
-    operator: ComparisonOperator,
-) -> FiniteComparisonDomain {
-    match ty {
-        Type::Union(union) => {
-            let mut has_finite = false;
-            let mut has_open = false;
-            for element in union.elements(db) {
-                match finite_comparison_domain(db, *element, operator) {
-                    FiniteComparisonDomain::None => has_open = true,
-                    FiniteComparisonDomain::Finite => has_finite = true,
-                    FiniteComparisonDomain::Mixed => return FiniteComparisonDomain::Mixed,
-                }
-            }
-            match (has_finite, has_open) {
-                (true, true) => FiniteComparisonDomain::Mixed,
-                (true, false) => FiniteComparisonDomain::Finite,
-                (false, _) => FiniteComparisonDomain::None,
-            }
-        }
-        Type::EnumComplement(_) => {
-            if KnownComparisonSemantics::of_type(db, ty, operator).is_some() {
-                FiniteComparisonDomain::Finite
-            } else {
-                FiniteComparisonDomain::None
-            }
-        }
-        Type::Intersection(intersection) => {
-            if intersection.enum_complement(db).is_some()
-                && KnownComparisonSemantics::of_type(db, ty, operator).is_some()
-            {
-                FiniteComparisonDomain::Finite
-            } else {
-                FiniteComparisonDomain::None
-            }
-        }
-        _ if finite_comparison_key(db, ty, operator).is_some() => FiniteComparisonDomain::Finite,
-        Type::NominalInstance(instance) => {
-            if instance.has_known_class(db, KnownClass::Bool)
-                || (enum_metadata(db, instance.class_literal(db)).is_some()
-                    && KnownComparisonSemantics::of_type(db, ty, operator).is_some())
-            {
-                FiniteComparisonDomain::Finite
-            } else {
-                FiniteComparisonDomain::None
-            }
-        }
-        _ => FiniteComparisonDomain::None,
     }
 }
 
@@ -1323,14 +1215,16 @@ fn finite_alternatives<'db>(
             }
             contains_finite_domain.then_some(alternatives)
         }
-        Type::EnumComplement(complement) => KnownComparisonSemantics::of_type(db, ty, operator)
-            .is_some()
-            .then(|| complement.remaining_literal_types(db)),
+        Type::EnumComplement(complement) => (KnownComparisonSemantics::of_type(db, ty, operator)
+            .is_some())
+        .then(|| complement.remaining_literal_types(db))
+        .and_then(|alternatives| bounded_finite_alternatives(db, alternatives, operator)),
         Type::Intersection(intersection) => {
             let complement = intersection.enum_complement(db)?;
             KnownComparisonSemantics::of_type(db, ty, operator)
                 .is_some()
                 .then(|| complement.remaining_literal_types(db))
+                .and_then(|alternatives| bounded_finite_alternatives(db, alternatives, operator))
         }
         Type::NominalInstance(instance) if instance.has_known_class(db, KnownClass::Bool) => {
             Some(vec![Type::bool_literal(true), Type::bool_literal(false)])
@@ -1338,10 +1232,24 @@ fn finite_alternatives<'db>(
         Type::NominalInstance(instance)
             if KnownComparisonSemantics::of_type(db, ty, operator).is_some() =>
         {
-            enum_member_literals(db, instance.class_literal(db), None).map(Iterator::collect)
+            enum_member_literals(db, instance.class_literal(db), None)
+                .and_then(|alternatives| bounded_finite_alternatives(db, alternatives, operator))
         }
         _ => None,
     }
+}
+
+fn bounded_finite_alternatives<'db>(
+    db: &'db dyn Db,
+    alternatives: impl IntoIterator<Item = Type<'db>>,
+    operator: ComparisonOperator,
+) -> Option<Vec<Type<'db>>> {
+    let alternatives = alternatives.into_iter().collect::<Vec<_>>();
+    (alternatives.len() == 1
+        || alternatives
+            .iter()
+            .all(|alternative| finite_comparison_key(db, *alternative, operator).is_some()))
+    .then_some(alternatives)
 }
 
 /// Return a constraint for literal pairs whose equality cannot be decided statically.
